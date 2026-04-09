@@ -14,7 +14,10 @@ impl PluginRegistry {
     }
 
     pub fn manifests(&self) -> Vec<PluginManifest> {
-        self.plugins.iter().map(|plugin| plugin.manifest()).collect()
+        self.plugins
+            .iter()
+            .map(|plugin| plugin.manifest())
+            .collect()
     }
 
     pub fn by_capability(&self, capability: &PluginCapability) -> Vec<PluginManifest> {

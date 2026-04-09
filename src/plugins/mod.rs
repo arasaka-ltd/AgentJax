@@ -1,2 +1,1 @@
-#[derive(Debug, Clone, Default)]
-pub struct PluginStub;
+pub mod providers;

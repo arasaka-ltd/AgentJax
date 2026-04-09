@@ -148,13 +148,14 @@ workspace/
 ### 4.1 `skills/`
 存放 skill 包或 skill 定义。
 ### 4.2 `memory/`
-用于承载分层记忆：
-- `daily/`：日常运行中沉淀的时间性记录
-- `topics/`：主题性记忆
+用于承载长期语义记忆域，而不是任意检索库。
+推荐承载：
+- `daily/`：候选性日常沉淀，等待提纯
+- `topics/`：主题性长期记忆
 - `profiles/`：人物、对象、组织画像
-- `scratch/`：临时草稿、待整理记忆
+- `scratch/`：临时草稿、待筛选内容
 ### 4.3 `knowledge/`
-存放知识文件、项目资料、文档库、知识块。
+存放通用知识域或领域知识库，例如项目资料、产品文档、API 文档、笔记库、代码知识块。
 ### 4.4 `prompts/`
 存放可复用 prompt blocks、模板、辅助说明材料。
 ---
@@ -167,6 +168,13 @@ workspace/
 - compact
 它是长期记忆索引和高价值摘要，不应成为无限膨胀的碎片堆。
 ### 5.2 `memory/**` 的职责
+`memory/**` 是 `Memory System` 在工作区内的主要落点。
+它承载的是：
+- 值得长期保留并影响未来行为的内容
+- 经过筛选、提纯、去重、冲突检测后的稳定语义记忆
+
+它不等于通用检索库，也不应承担所有知识问题。
+
 细节性、可演化、待归档内容进入 `memory/` 子目录。
 建议职责：
 - `memory/daily/`：按日期或时间周期记录
@@ -175,14 +183,25 @@ workspace/
 - `memory/scratch/`：短期草稿、等待 LCM 压缩的临时内容
 ### 5.3 与 LCM / Recall 的关系
 这套结构天然适合后续实现：
-- recall 分级检索
-- long context management
-- compaction / memory distillation
-- topic/profile-based retrieval
+- memory recall
+- memory distillation
+- promotion / conflict / freshness policy
+- topic / profile-based retrieval
+
+但要明确：
+- `LCM` 负责单会话 / 单任务连续性
+- `RAG` 负责通用 retrieval substrate
+- `Memory` 负责基于 `RAG` 的长期语义层
 ### 5.4 推荐原则
 - `MEMORY.md` 只保留高价值稳定内容
 - 原始堆积不要直接塞顶层
 - LCM 可以把 `scratch/` 与 `daily/` 的内容提炼进 `MEMORY.md` 或 `topics/`
+- `knowledge/` 可以大量 ingest，`memory/` 必须更贵地写入
+### 5.5 与 `knowledge/` 的区别
+- `knowledge/` 面向领域知识库，可大量导入、增量更新、通用检索
+- `memory/` 面向 durable agent knowledge，只收会影响未来行为的稳定内容
+- `knowledge/` 的召回目标是“找到相关证据”
+- `memory/` 的召回目标是“拿回长期有效的认知约束”
 ---
 ## 6. Runtime 配置目录规范
 ### 6.1 配置目录不在工作区内
@@ -196,6 +215,8 @@ workspace/
     models.toml
     resources.toml
     channels.toml
+    surfaces.toml
+    daemon.toml
     nodes.toml
     scheduler.toml
     skills.toml
@@ -251,6 +272,18 @@ provider 实例与凭据引用：
 - Telegram bot tokens
 - webhook / polling mode
 - Discord / Email 等渠道实例
+- 这里只配置外部 message channels，不配置 TUI / WebUI / WebSocket surface
+#### `surfaces.toml`
+core surfaces 配置：
+- TUI defaults
+- WebUI session policy
+- local operator UX policy
+#### `daemon.toml`
+daemon / transport 配置：
+- unix socket path
+- websocket bind address
+- local auth / token policy
+- pid / lock / run directory policy
 #### `nodes.toml`
 node / worker / browser / remote machine registry。
 #### `scheduler.toml`

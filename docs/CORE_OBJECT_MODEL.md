@@ -117,6 +117,7 @@ pub struct Session {
     pub workspace_id: String,
     pub agent_id: String,
     pub channel_id: Option<String>,
+    pub surface_id: Option<String>,
     pub user_id: Option<String>,
     pub title: Option<String>,
     pub mode: SessionMode,
@@ -139,6 +140,10 @@ pub enum SessionStatus {
     Archived,
 }
 ```
+### 5.3 边界说明
+- `channel_id` 只指向外部消息平台渠道，例如 `telegram.main`
+- `surface_id` 指向人机交互界面，例如 `tui.local`、`webui.local`
+- `WebSocket` / `Unix socket` 属于 transport，不应直接塞进 `channel_id`
 ---
 ## 6. Turn
 ### 6.1 定义

@@ -19,16 +19,16 @@ pub mod usage;
 
 pub use agent::{Agent, AgentStatus};
 pub use artifact::{Artifact, ArtifactProducer, RetentionPolicy};
-pub use billing::BillingRecord;
+pub use billing::{BillingBreakdownItem, BillingConfidence, BillingMode, BillingRecord};
 pub use context::{Confidence, ContextBlock, ContextBlockKind, ContextSource, Freshness};
 pub use event::{EventRecord, EventSource, EventType, RuntimeEvent};
 pub use node::{Node, NodeKind, NodeStatus, TrustLevel};
 pub use object_meta::ObjectMeta;
 pub use plugin::{
-    ChannelCapability, CommandCapability, ContextCapability, HookCapability, HookPoint,
-    MemoryCapability, NodeCapability, Permission, PluginCapability, PluginDescriptor,
-    PluginManifest, PluginStatus, ProviderCapability, ResourceDescriptor, SkillCapability,
-    ToolCapability, UiCapability, WorkflowCapability,
+    BillingCapability, ChannelCapability, CommandCapability, ContextCapability, HookCapability,
+    HookPoint, KnowledgeCapability, MemoryCapability, NodeCapability, Permission, PluginCapability,
+    PluginDescriptor, PluginManifest, PluginStatus, ProviderCapability, RagCapability,
+    ResourceDescriptor, SkillCapability, ToolCapability, UiCapability, WorkflowCapability,
 };
 pub use policies::{
     AutonomyPolicy, BackoffStrategy, BreakerStatus, CircuitBreakerState, ContextAssemblyPurpose,
@@ -43,4 +43,4 @@ pub use summary::{InvalidationStatus, ResumePack, SummaryNode, SummaryStatus, Su
 pub use task::{Task, TaskPhase, TaskPriority, TaskStatus};
 pub use tool::{ToolCall, ToolCaller};
 pub use turn::{Turn, TurnPhase, TurnStatus, TurnSummary};
-pub use usage::UsageRecord;
+pub use usage::{UsageCategory, UsageRecord};

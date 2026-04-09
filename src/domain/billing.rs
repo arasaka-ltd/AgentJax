@@ -1,9 +1,38 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BillingMode {
+    Estimated,
+    ProviderReported,
+    Reconciled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BillingConfidence {
+    Low,
+    Medium,
+    High,
+    Exact,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BillingBreakdownItem {
+    pub item_type: String,
+    pub quantity: String,
+    pub unit_price: Option<String>,
+    pub subtotal: String,
+    pub note: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BillingRecord {
     pub billing_id: String,
-    pub usage_id: Option<String>,
-    pub amount_micros: u64,
+    pub usage_id: String,
+    pub amount: String,
     pub currency: String,
+    pub mode: BillingMode,
+    pub rule_id: Option<String>,
+    pub confidence: BillingConfidence,
+    pub breakdown: Vec<BillingBreakdownItem>,
+    pub generated_at: chrono::DateTime<chrono::Utc>,
 }

@@ -15,6 +15,9 @@
 - Core Object Model
 - Workspace / Config / State Layout
 - Plugin SDK + Resource Model
+- RAG / Knowledge / Memory
+- Channels / Daemon / Client
+- Daemon API / IPC Schema
 - Event / Task / LCM Runtime
 - Usage / Billing / Scheduler / Node
 - LCM Context Engine
@@ -29,9 +32,12 @@
 2. `docs/CORE_OBJECT_MODEL.md`
 3. `docs/WORKSPACE_AND_CONFIG_SPEC.md`
 4. `docs/PLUGIN_SDK.md`
-5. `docs/EVENT_TASK_LCM_RUNTIME.md`
-6. `docs/LCM_CONTEXT_ENGINE.md`
-7. `docs/USAGE_BILLING_SCHEDULER_NODE_SPEC.md`
+5. `docs/RAG_KNOWLEDGE_MEMORY_SPEC.md`
+6. `docs/CHANNELS_DAEMON_CLIENT_SPEC.md`
+7. `docs/DAEMON_API_IPC_SCHEMA.md`
+8. `docs/EVENT_TASK_LCM_RUNTIME.md`
+9. `docs/LCM_CONTEXT_ENGINE.md`
+10. `docs/USAGE_BILLING_SCHEDULER_NODE_SPEC.md`
 
 ## 保留本文件的意义
 本文件仅作为历史背景材料保留，用于说明项目最初的落地路径与演进起点，不再作为当前实现依据。

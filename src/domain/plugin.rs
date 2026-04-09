@@ -5,6 +5,9 @@ use crate::domain::ResourceId;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PluginCapability {
     Provider(ProviderCapability),
+    Rag(RagCapability),
+    Knowledge(KnowledgeCapability),
+    Billing(BillingCapability),
     Memory(MemoryCapability),
     Context(ContextCapability),
     Tool(ToolCapability),
@@ -25,13 +28,40 @@ pub enum ProviderCapability {
     Reranker,
     Tts,
     St,
+    ImageGeneration,
+    VideoGeneration,
+    MusicGeneration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RagCapability {
+    Query,
+    Indexing,
+    BackendDriver,
+    EvidencePack,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum KnowledgeCapability {
+    Corpus,
+    IngestPolicy,
+    RetrievalPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BillingCapability {
+    UsageMeter,
+    CostEstimator,
+    ProviderReportedBilling,
+    Reconciliation,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MemoryCapability {
     Recall,
-    Indexing,
-    Compaction,
+    Promotion,
+    ConflictResolution,
+    FreshnessPolicy,
     Archive,
 }
 
@@ -55,8 +85,8 @@ pub enum ChannelCapability {
     Discord,
     Qq,
     Email,
-    Cli,
-    Http,
+    Slack,
+    Webhook,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -9,7 +9,10 @@ pub struct EventStore {
 
 impl EventStore {
     pub fn append(&self, event: RuntimeEvent) {
-        self.events.lock().expect("event store poisoned").push(event);
+        self.events
+            .lock()
+            .expect("event store poisoned")
+            .push(event);
     }
 
     pub fn list(&self) -> Vec<RuntimeEvent> {

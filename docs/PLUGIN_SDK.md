@@ -3,6 +3,8 @@
 本文档用于定义 AgentJax 下一阶段要采用的 **OpenClaw 风格核心 + 插件化 Runtime + Workspace 中心** 架构中的插件 SDK 设计原则。
 目标不是“支持几个工具扩展”，而是把插件提升为整个 runtime 的统一扩展面，使以下能力都能通过统一协议接入：
 - 模型 Provider
+- RAG / Retrieval
+- Knowledge
 - Memory
 - Context Engine
 - Tool / Executor / MCP
@@ -14,6 +16,13 @@
 - UI
 - Workflow / Scheduler
 同时，插件作者应拿到的是 **平台能力抽象**，而不是底层 provider 细节、配置读取、密钥管理、HTTP 细节与 fallback 逻辑。
+
+这里必须明确一个边界：
+- `Channel` = 外部消息平台接入
+- `Surface` = CLI / TUI / WebUI 等人机界面
+- `Transport` = unix socket / websocket / http / stdio 等承载协议
+
+不要把三者混成一个词。
 ---
 ## 2. 设计目标
 ### 2.1 核心目标
@@ -24,7 +33,7 @@
    - 一个插件可以提供多个 capability。
    - 所有能力必须显式注册，不允许隐式挂载。
 3. **资源统一访问**
-   - 插件通过 `PluginContext` 访问模型、音频、memory、tools、channels、artifacts 等平台资源。
+   - 插件通过 `PluginContext` 访问模型、rag、knowledge、memory、tools、channels、artifacts 等平台资源。
    - 插件不自己管理 provider 细节。
 4. **Workspace 一等公民**
    - 插件在 workspace 中启用。
@@ -44,9 +53,11 @@ Application Host
       -> Context Engine
       -> Tool Router
       -> Hook Bus / Event Bus
-      -> Session / Memory / Artifact Stores
+      -> Session / RAG / Memory / Artifact Stores
       -> Agent Backend (rig 等)
   -> Channel Adapters
+  -> Core Surfaces
+  -> Built-in Transports
 ```
 ### 分层说明
 #### Core
@@ -82,6 +93,8 @@ Application Host
 ```rust
 pub enum PluginCapability {
     Provider(ProviderCapability),
+    Rag(RagCapability),
+    Knowledge(KnowledgeCapability),
     Memory(MemoryCapability),
     Context(ContextCapability),
     Tool(ToolCapability),
@@ -111,21 +124,51 @@ pub enum ProviderCapability {
     St,
 }
 ```
-### 4.3 MemoryPlugin
-用于记忆相关能力：
-- recall
+### 4.3 RagPlugin
+用于通用检索基础设施：
+- collection abstraction
 - indexing
-- compaction / LCM
+- retrieval
+- rerank / expansion hooks
+- backend drivers
+```rust
+pub enum RagCapability {
+    Query,
+    Indexing,
+    BackendDriver,
+    EvidencePack,
+}
+```
+### 4.4 KnowledgePlugin
+用于特定知识域系统：
+- project knowledge base
+- product docs
+- api docs
+- notes / artifacts / code corpora
+```rust
+pub enum KnowledgeCapability {
+    Corpus,
+    IngestPolicy,
+    RetrievalPolicy,
+}
+```
+### 4.5 MemoryPlugin
+用于长期语义记忆能力：
+- promotion
+- recall
+- conflict resolution
+- freshness / invalidation
 - archival storage
 ```rust
 pub enum MemoryCapability {
     Recall,
-    Indexing,
-    Compaction,
+    Promotion,
+    ConflictResolution,
+    FreshnessPolicy,
     Archive,
 }
 ```
-### 4.4 ContextPlugin
+### 4.6 ContextPlugin
 用于上下文构造与选择：
 - context block generation
 - context selection
@@ -137,7 +180,7 @@ pub enum ContextCapability {
     PromptRenderer,
 }
 ```
-### 4.5 ToolPlugin
+### 4.7 ToolPlugin
 用于工具与执行器：
 - local tools
 - remote executors
@@ -149,24 +192,24 @@ pub enum ToolCapability {
     McpBridge,
 }
 ```
-### 4.6 ChannelPlugin
-用于消息渠道：
+### 4.8 ChannelPlugin
+用于外部消息平台渠道：
 - Telegram
 - Discord
 - QQ
 - Email
-- CLI / HTTP 等
+- Slack / Webhook 等
 ```rust
 pub enum ChannelCapability {
     Telegram,
     Discord,
     Qq,
     Email,
-    Cli,
-    Http,
+    Slack,
+    Webhook,
 }
 ```
-### 4.7 NodePlugin
+### 4.9 NodePlugin
 用于远程 worker / machine / browser 节点：
 ```rust
 pub enum NodeCapability {
@@ -176,7 +219,7 @@ pub enum NodeCapability {
     BrowserNode,
 }
 ```
-### 4.8 SkillPlugin
+### 4.10 SkillPlugin
 用于 skills：
 - skill manifest
 - skill loading
@@ -188,7 +231,7 @@ pub enum SkillCapability {
     TriggerRouter,
 }
 ```
-### 4.9 CommandPlugin
+### 4.11 CommandPlugin
 用于 CLI / admin / diagnostics：
 ```rust
 pub enum CommandCapability {
@@ -197,7 +240,7 @@ pub enum CommandCapability {
     Diagnostic,
 }
 ```
-### 4.10 HookPlugin
+### 4.12 HookPlugin
 用于生命周期与事件订阅：
 ```rust
 pub enum HookCapability {
@@ -205,8 +248,8 @@ pub enum HookCapability {
     EventSubscription,
 }
 ```
-### 4.11 UIPlugin
-用于 dashboard / debug pane / inspector：
+### 4.13 UIPlugin
+用于 dashboard / debug pane / inspector 等可嵌入 UI 扩展，不用于 TUI / WebUI runtime surface 本体：
 ```rust
 pub enum UiCapability {
     DashboardPane,
@@ -214,7 +257,7 @@ pub enum UiCapability {
     DebugView,
 }
 ```
-### 4.12 WorkflowPlugin
+### 4.14 WorkflowPlugin
 用于调度与自动化：
 ```rust
 pub enum WorkflowCapability {
@@ -251,6 +294,7 @@ pub trait Plugin: Send + Sync {
 - 所有插件都有统一 manifest。
 - 生命周期方法提供默认空实现。
 - 高阶能力通过附加 trait 暴露，而不是把所有方法塞进一个 trait。
+- `Unix socket` / `WebSocket` server 不属于普通插件能力，属于 daemon 内建 transport。
 ### 5.2 PluginManifest
 ```rust
 pub struct PluginManifest {
@@ -317,6 +361,8 @@ pub struct PluginContext {
     pub resources: ResourceRegistryHandle,
     pub models: ModelClient,
     pub audio: AudioClient,
+    pub rag: RagClient,
+    pub knowledge: KnowledgeClient,
     pub memory: MemoryClient,
     pub tools: ToolClient,
     pub artifacts: ArtifactClient,
@@ -335,6 +381,8 @@ pub struct PluginContext {
 ```rust
 ctx.models.generate(...)
 ctx.models.embed(...)
+ctx.rag.query(...)
+ctx.knowledge.search(...)
 ctx.audio.tts(...)
 ctx.audio.st(...)
 ctx.memory.recall(...)
@@ -353,8 +401,11 @@ ctx.channels.send(...)
 - `model:reasoning`
 - `model:embedding`
 - `model:reranker`
+- `model:expander`
 - `audio:tts`
 - `audio:st`
+- `store:fts`
+- `store:knowledge`
 - `store:memory`
 - `store:vector`
 - `store:artifact`
@@ -363,6 +414,8 @@ ctx.channels.send(...)
 - `net:http`
 - `channel:telegram`
 - `channel:discord`
+- `transport:unix_socket`
+- `transport:websocket`
 ### 7.2 资源声明
 插件 manifest 可声明需求：
 ```toml
@@ -382,6 +435,8 @@ runtime 根据全局配置与 workspace 策略进行绑定。
 ### 7.4 MVP 阶段建议先实现的资源客户端
 第一轮不必一步到位，优先抽象：
 - `ModelClient`
+- `RagClient`
+- `KnowledgeClient`
 - `ToolClient`
 - `MemoryClient`
 - `ArtifactClient`

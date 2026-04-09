@@ -1,5 +1,5 @@
-use std::sync::{Arc, Mutex};
 use crate::domain::ContextBlock;
+use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone, Default)]
 pub struct ProjectionStore {
     blocks: Arc<Mutex<Vec<ContextBlock>>>,
@@ -9,6 +9,9 @@ impl ProjectionStore {
         *self.blocks.lock().expect("projection store poisoned") = blocks;
     }
     pub fn current(&self) -> Vec<ContextBlock> {
-        self.blocks.lock().expect("projection store poisoned").clone()
+        self.blocks
+            .lock()
+            .expect("projection store poisoned")
+            .clone()
     }
 }

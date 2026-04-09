@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::domain::{Confidence, Freshness, ObjectMeta};
+use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SummaryType {
     LeafSummary,

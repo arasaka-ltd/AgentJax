@@ -4,15 +4,17 @@
 本规范要解决的核心问题不是“怎么做一点摘要”，而是：
 **如何把长期 agent 连续性从 prompt 技巧变成确定性的系统层能力。**
 这里先拍死一个边界：
-- 工作区记忆 / RAG 只是检索便利层
+- 工作区记忆 / RAG 不是连续性地基
 - LCM Context Engine 才是无限对话连续性的地基
 换句话说：
-- Memory / RAG 回答的是：**你知道什么**
+- RAG 回答的是：**你能把什么找回来**
+- Memory 回答的是：**哪些东西值得长期留下**
 - Context Engine 回答的是：**你为什么还没失忆**
 本文档与已有文档的关系：
 - `docs/CORE_OBJECT_MODEL.md`：定义核心对象
 - `docs/WORKSPACE_AND_CONFIG_SPEC.md`：定义 workspace / config / state 布局
 - `docs/PLUGIN_SDK.md`：定义插件与资源层
+- `docs/RAG_KNOWLEDGE_MEMORY_SPEC.md`：定义 RAG / Knowledge / Memory 分层
 - `docs/EVENT_TASK_LCM_RUNTIME.md`：定义 event / task / LCM runtime 总体契约
 - `docs/LCM_CONTEXT_ENGINE.md`：定义原生上下文引擎本体
 ---
@@ -37,9 +39,10 @@ Context Engine 不负责：
 这些属于：
 - memory engine
 - RAG engine
+- knowledge systems
 - profile store
 ### 2.3 一句话定义
-**Context Engine 管“当前这条长生命线怎么不断”，Memory Engine 管“哪些东西值得跨生命线留下”。**
+**Context Engine 管“当前这条长生命线怎么不断”，RAG Engine 管“相关证据怎么找回来”，Memory System 管“哪些东西值得跨生命线留下”。**
 ---
 ## 3. 核心思维：从 transcript 转向 event stream
 ### 3.1 不要以 message 为中心
@@ -441,15 +444,21 @@ Context Engine 建议拆成 6 个内部模块：
 ### 18.1 Context Continuity Memory
 - 单会话 / 单任务连续性
 - 由 LCM / Context Engine 管理
-### 18.2 Durable Semantic Memory
+### 18.2 Generic Retrieval Infrastructure
+- 面向任意语料的检索、排序、扩展、聚合
+- 由 RAG engine 管理
+### 18.3 Durable Semantic Memory
 - 跨会话稳定信息
-- 由 memory / RAG / profile engine 管理
-### 18.3 两者关系
+- 由 memory system 管理
+- 构建在 RAG 之上
+### 18.4 两者关系
 - LCM 提供“不失忆”
-- RAG 提供“会联想”
+- RAG 提供“会找”
+- Memory 提供“记该记的”
 正确顺序是：
-**先有前者，再谈后者。**
+**先有 LCM，再有 RAG，再在 RAG 之上做 Memory。**
 没有 LCM，再强的 RAG 也只是偶尔想起来点东西，不是连续性。
+如果把顺序反过来，最后就会变成“拿记忆系统硬扛所有知识问题”。
 ---
 ## 19. 比 lossless-claw 再往前走的 6 个点
 1. 以 event 为中心，而不是 message 为中心
@@ -487,4 +496,4 @@ AgentJax 的真正灵魂不是 tool calling、不是插件 SDK、甚至不是 pr
 **把长期 agent 连续性从“prompt 技巧”升级为“确定性的系统层能力”。**
 这就是 Context Engine 的使命。
 一句话总结：
-**LCM 负责让 agent 不失忆；RAG 负责让 agent 会联想。前者是地基，后者是外挂。**
+**LCM 负责不失忆；RAG 负责会找；Memory 负责记该记的。**

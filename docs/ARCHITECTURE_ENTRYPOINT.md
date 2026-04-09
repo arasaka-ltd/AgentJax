@@ -7,6 +7,8 @@
 - 插件化 runtime
 - event/task/LCM runtime
 - LCM context engine
+- RAG/knowledge/memory 分层
+- daemon/client/channels/surfaces/transports 分层
 - usage/billing/scheduler/node 扩展边界
 作为正式实现起点。
 这份文档的作用是：
@@ -81,7 +83,37 @@ AgentJax 当前的正式架构规范由以下文档组成。
   - leaf / condensed / checkpoint compaction
   - purpose-aware assembly
   - resume-first design
-### Spec 6：Usage / Billing / Scheduler / Node
+### Spec 6：RAG / Knowledge / Memory
+- `docs/RAG_KNOWLEDGE_MEMORY_SPEC.md`
+- 作用：定义 RAG、Knowledge、Memory 的正式分层与职责边界
+- 包括：
+  - Context Engine / RAG / Knowledge / Memory 的四层关系
+  - RAG engine 作为通用 retrieval substrate 的能力面
+  - collection / index pipeline / query pipeline / driver 抽象
+  - knowledge system 的领域化组织方式
+  - memory system 作为基于 RAG 的特化长期语义层
+  - promotion / conflict / freshness / behavioral relevance policy
+### Spec 7：Channels / Daemon / Client
+- `docs/CHANNELS_DAEMON_CLIENT_SPEC.md`
+- 作用：定义 daemon/client、surface/channel/transport、IPC/WebSocket API 的正式分层
+- 包括：
+  - daemon-only runtime 原则
+  - core surfaces 与 plugin channels 的边界
+  - unix socket / websocket 双 transport 模型
+  - unified API schema across transports
+  - daemon lifecycle 与 module-level hot reload
+  - cli / tui / webui 的角色划分
+### Spec 8：Daemon API / IPC Schema
+- `docs/DAEMON_API_IPC_SCHEMA.md`
+- 作用：定义 daemon 对外 request/response/event/stream/error 的协议契约
+- 包括：
+  - hello / hello_ack 握手
+  - request / response / event / stream / error envelope
+  - method namespace
+  - subscription / stream lifecycle
+  - error model
+  - runtime / config / plugin / session / task 等最低 payload schema
+### Spec 9：Usage / Billing / Scheduler / Node
 - `docs/USAGE_BILLING_SCHEDULER_NODE_SPEC.md`
 - 作用：定义 usage facts、billing facts、scheduled task、capability node 的扩展边界
 - 包括：
@@ -101,6 +133,10 @@ AgentJax 当前的正式架构规范由以下文档组成。
 - Artifacts 是产物
 - Event log 是事实层
 - LCM 是连续性基础设施
+- RAG 是通用检索基础设施
+- Memory 是基于 RAG 的特化长期语义层
+- Daemon 是唯一运行时宿主
+- Surface / Channel / Transport 必须显式分层
 - Plugin Runtime 是扩展面
 - Resource Layer 是能力接入面
 - Scheduler / Node / Billing 是扩展执行与运营层
@@ -335,7 +371,7 @@ src/
 ### 推荐启动提示词
 > 请以 `docs/ARCHITECTURE_ENTRYPOINT.md` 作为唯一开发入口，按其中的推荐代码结构对当前 Rust 项目做第一轮架构重构。目标不是继续实现功能，而是把现有规范落成 Rust 类型系统与模块骨架。优先完成 `src/config/`、`src/core/`、`src/domain/`、`src/context_engine/`、`src/plugins/` 的目录重组；落地 Core Object Model、Workspace/Runtime 路径模型、PluginManifest/PluginRegistry 最小骨架、RuntimeEvent/TurnPhase/TaskPhase/ContextAssemblyPurpose/ResumePack 等关键类型；将 `Application` 重构为 plugin host + workspace runtime host；保留旧实现为最小兼容壳，最终目标是保持项目 `cargo check` 通过。
 ### 更强约束版启动提示词
-> 请严格按 `docs/ARCHITECTURE_ENTRYPOINT.md`、`docs/CORE_OBJECT_MODEL.md`、`docs/WORKSPACE_AND_CONFIG_SPEC.md`、`docs/PLUGIN_SDK.md`、`docs/EVENT_TASK_LCM_RUNTIME.md`、`docs/LCM_CONTEXT_ENGINE.md` 的契约，重构当前 Rust 项目。第一轮不要扩功能，不要优先 Telegram/tool calling，而是先完成 domain/core/config/context_engine 的类型与骨架，保持 cargo check 通过，并为后续 plugin/runtime/context engine 落地建立稳定边界。
+> 请严格按 `docs/ARCHITECTURE_ENTRYPOINT.md`、`docs/CORE_OBJECT_MODEL.md`、`docs/WORKSPACE_AND_CONFIG_SPEC.md`、`docs/PLUGIN_SDK.md`、`docs/RAG_KNOWLEDGE_MEMORY_SPEC.md`、`docs/CHANNELS_DAEMON_CLIENT_SPEC.md`、`docs/DAEMON_API_IPC_SCHEMA.md`、`docs/EVENT_TASK_LCM_RUNTIME.md`、`docs/LCM_CONTEXT_ENGINE.md` 的契约，重构当前 Rust 项目。第一轮不要扩功能，不要优先 Telegram/tool calling，而是先完成 domain/core/config/context_engine 的类型与骨架，保持 cargo check 通过，并为后续 plugin/runtime/context engine / rag subsystem / daemon api 落地建立稳定边界。
 ---
 ## 10. 建议的实现顺序总览
 如果把后续工作拆成几轮，我建议：

@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use crate::config::RuntimeConfig;
 use crate::core::{EventBus, HookBus, ResourceRegistry};
-use crate::domain::PluginManifest;
+use crate::domain::{BillingRecord, PluginManifest, Resource, UsageRecord};
 
 #[derive(Clone)]
 pub struct PluginContext {
@@ -30,6 +30,17 @@ pub trait Plugin: Send + Sync {
 
     async fn on_shutdown(&self, _ctx: PluginContext) -> Result<()> {
         Ok(())
+    }
+}
+
+pub trait ResourceProviderPlugin: Plugin {
+    fn provided_resources(&self) -> Vec<Resource>;
+}
+
+#[async_trait]
+pub trait BillingPlugin: Plugin {
+    async fn estimate_billing(&self, _usage: &UsageRecord) -> Result<Option<BillingRecord>> {
+        Ok(None)
     }
 }
 

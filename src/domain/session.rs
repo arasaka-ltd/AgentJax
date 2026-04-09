@@ -24,6 +24,7 @@ pub struct Session {
     pub workspace_id: String,
     pub agent_id: String,
     pub channel_id: Option<String>,
+    pub surface_id: Option<String>,
     pub user_id: Option<String>,
     pub title: Option<String>,
     pub mode: SessionMode,
