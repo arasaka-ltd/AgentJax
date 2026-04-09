@@ -1,6 +1,4 @@
-use agentjax::bootstrap::bootstrap_application;
-
-fn main() -> anyhow::Result<()> {
-    let _app = bootstrap_application()?;
-    Ok(())
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    agentjax::cli::run().await
 }

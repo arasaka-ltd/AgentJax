@@ -80,6 +80,47 @@ pub enum ApiMethod {
     StreamCancel,
 }
 
+impl ApiMethod {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RuntimePing => "runtime.ping",
+            Self::RuntimeStatus => "runtime.status",
+            Self::RuntimeShutdown => "runtime.shutdown",
+            Self::ConfigInspect => "config.inspect",
+            Self::ConfigValidate => "config.validate",
+            Self::ConfigReload => "config.reload",
+            Self::PluginList => "plugin.list",
+            Self::PluginInspect => "plugin.inspect",
+            Self::PluginReload => "plugin.reload",
+            Self::PluginTest => "plugin.test",
+            Self::AgentList => "agent.list",
+            Self::AgentGet => "agent.get",
+            Self::SessionList => "session.list",
+            Self::SessionGet => "session.get",
+            Self::SessionSend => "session.send",
+            Self::SessionCancel => "session.cancel",
+            Self::SessionSubscribe => "session.subscribe",
+            Self::TaskList => "task.list",
+            Self::TaskGet => "task.get",
+            Self::TaskCancel => "task.cancel",
+            Self::TaskRetry => "task.retry",
+            Self::TaskSubscribe => "task.subscribe",
+            Self::NodeList => "node.list",
+            Self::NodeGet => "node.get",
+            Self::ScheduleList => "schedule.list",
+            Self::ScheduleCreate => "schedule.create",
+            Self::ScheduleUpdate => "schedule.update",
+            Self::ScheduleDelete => "schedule.delete",
+            Self::DoctorRun => "doctor.run",
+            Self::SmokeRun => "smoke.run",
+            Self::LogsTail => "logs.tail",
+            Self::MetricsSnapshot => "metrics.snapshot",
+            Self::SubscriptionCancel => "subscription.cancel",
+            Self::StreamCancel => "stream.cancel",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimePingResponse {
     pub pong: bool,
@@ -221,9 +262,11 @@ pub struct SessionGetRequest {
     pub session_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionGetResponse {
     pub session: Session,
+    pub messages: Vec<SessionMessage>,
+    pub events: Vec<crate::domain::RuntimeEvent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

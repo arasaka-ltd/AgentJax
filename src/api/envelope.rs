@@ -1,3 +1,4 @@
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -66,6 +67,18 @@ pub struct HelloAckEnvelope {
     pub connection_id: ConnectionId,
 }
 
+impl HelloAckEnvelope {
+    pub fn new(connection_id: ConnectionId, api_version: impl Into<String>) -> Self {
+        Self {
+            ok: true,
+            api_version: api_version.into(),
+            schema_version: "2026-04-10".into(),
+            daemon_version: env!("CARGO_PKG_VERSION").into(),
+            connection_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RequestEnvelope {
     pub id: RequestId,
@@ -73,6 +86,21 @@ pub struct RequestEnvelope {
     pub params: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<RequestMeta>,
+}
+
+impl RequestEnvelope {
+    pub fn parse_params<T>(&self) -> Result<T, ApiError>
+    where
+        T: DeserializeOwned,
+    {
+        serde_json::from_value(self.params.clone()).map_err(|error| {
+            ApiError::new(
+                crate::api::ApiErrorCode::InvalidRequest,
+                format!("invalid params for {}: {error}", self.method.as_str()),
+                false,
+            )
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -85,6 +113,28 @@ pub struct ResponseEnvelope {
     pub error: Option<ApiError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
+}
+
+impl ResponseEnvelope {
+    pub fn ok(id: RequestId, result: Value) -> Self {
+        Self {
+            id,
+            ok: true,
+            result: Some(result),
+            error: None,
+            meta: None,
+        }
+    }
+
+    pub fn err(id: RequestId, error: ApiError) -> Self {
+        Self {
+            id,
+            ok: false,
+            result: None,
+            error: Some(error),
+            meta: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -137,6 +187,12 @@ pub enum ServerEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ApiErrorEnvelope {
     pub error: ApiError,
+}
+
+impl ApiErrorEnvelope {
+    pub fn new(error: ApiError) -> Self {
+        Self { error }
+    }
 }
 
 pub type EventEnvelope = EventPayload;

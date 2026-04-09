@@ -4,8 +4,8 @@ pub mod ids;
 pub mod methods;
 
 pub use envelope::{
-    ActorIdentity, ClientEnvelope, EventEnvelope, EventEnvelopeMeta, EventPayload,
-    HelloAckEnvelope, HelloEnvelope, RequestEnvelope, RequestMeta, ResponseEnvelope,
+    ActorIdentity, ApiErrorEnvelope, ClientEnvelope, EventEnvelope, EventEnvelopeMeta,
+    EventPayload, HelloAckEnvelope, HelloEnvelope, RequestEnvelope, RequestMeta, ResponseEnvelope,
     ServerEnvelope, StreamEnvelope, StreamEnvelopeMeta, StreamPayload, StreamPhase,
 };
 pub use error::{ApiError, ApiErrorCode};
