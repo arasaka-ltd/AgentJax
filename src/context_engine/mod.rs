@@ -9,7 +9,7 @@ pub mod schema;
 
 pub use assembler::{AssembledContext, ContextAssemblyRequest, TokenBreakdown};
 pub use compactor::{CompactionDecision, CompactionEvaluator};
-pub use engine::{ContextEngine, NoopContextEngine};
+pub use engine::{ContextEngine, NoopContextEngine, WorkspaceContextEngine};
 pub use event_store::EventStore;
 pub use expander::HistoryExpander;
 pub use projection_store::ProjectionStore;

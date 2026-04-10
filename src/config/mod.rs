@@ -8,4 +8,6 @@ pub use loader::ConfigLoader;
 pub use paths::{ConfigRoot, RuntimePaths, WorkspacePaths};
 pub use provider::{LlmProviderConfig, OpenAiProviderConfig};
 pub use runtime::{AgentDefinition, AgentRuntimeConfig, LlmRuntimeConfig, RuntimeConfig};
-pub use workspace::{WorkspaceBootstrapPolicy, WorkspaceConfig};
+pub use workspace::{
+    WorkspaceBootstrapPolicy, WorkspaceConfig, WorkspaceDocument, WorkspaceIdentityPack,
+};

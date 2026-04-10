@@ -14,7 +14,7 @@
 
 ---
 ## Batch 1: Workspace Persona + Context v0
-- [ ] 实现 workspace 文件真实加载：
+- [x] 实现 workspace 文件真实加载：
   - `AGENT.md`
   - `SOUL.md`
   - `USER.md`
@@ -22,15 +22,15 @@
   - `RULES.md`
   - `ROUTER.md`
   - `MEMORY.md`
-- [ ] 定义 `WorkspaceIdentityPack` 或等价结构，承载上述文件内容与来源路径
-- [ ] 让 `ConfigLoader` / `bootstrap` 不再只返回硬编码默认值，而是能从本地 `config/` 与 `workspace/` 真读取
-- [ ] 实现 `ContextEngine v0`：
+- [x] 定义 `WorkspaceIdentityPack` 或等价结构，承载上述文件内容与来源路径
+- [x] 让 `ConfigLoader` / `bootstrap` 不再只返回硬编码默认值，而是能从本地 `config/` 与 `workspace/` 真读取
+- [x] 实现 `ContextEngine v0`：
   - workspace identity blocks
   - `MEMORY.md` block
   - recent transcript block
   - token breakdown 最小实现
-- [ ] 让 `session.send` 改为走 `assemble_context()`，而不是直接拼 transcript
-- [ ] 为 workspace 加载和 context assembly 补最小测试或可验证样例
+- [x] 让 `session.send` 改为走 `assemble_context()`，而不是直接拼 transcript
+- [x] 为 workspace 加载和 context assembly 补最小测试或可验证样例
 
 ## Batch 2: Tool Calling v0
 - [ ] 实现 `ToolRegistry`

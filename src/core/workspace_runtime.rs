@@ -1,13 +1,17 @@
-use crate::config::WorkspaceConfig;
+use crate::config::{WorkspaceConfig, WorkspaceIdentityPack};
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceRuntime {
     pub workspace: WorkspaceConfig,
+    pub identity: WorkspaceIdentityPack,
 }
 
 impl WorkspaceRuntime {
-    pub fn new(workspace: WorkspaceConfig) -> Self {
-        Self { workspace }
+    pub fn new(workspace: WorkspaceConfig, identity: WorkspaceIdentityPack) -> Self {
+        Self {
+            workspace,
+            identity,
+        }
     }
 
     pub fn workspace_id(&self) -> &str {
@@ -21,9 +25,9 @@ pub struct WorkspaceRuntimeHost {
 }
 
 impl WorkspaceRuntimeHost {
-    pub fn new(workspace: WorkspaceConfig) -> Self {
+    pub fn new(workspace: WorkspaceConfig, identity: WorkspaceIdentityPack) -> Self {
         Self {
-            workspace_runtime: WorkspaceRuntime::new(workspace),
+            workspace_runtime: WorkspaceRuntime::new(workspace, identity),
         }
     }
 
@@ -33,5 +37,9 @@ impl WorkspaceRuntimeHost {
 
     pub fn workspace(&self) -> &WorkspaceConfig {
         &self.workspace_runtime.workspace
+    }
+
+    pub fn identity(&self) -> &WorkspaceIdentityPack {
+        &self.workspace_runtime.identity
     }
 }

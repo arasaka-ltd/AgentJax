@@ -13,9 +13,10 @@ use crate::{
         StreamEnvelope, StreamPhase,
     },
     app::Application,
+    context_engine::{AssembledContext, ContextAssemblyRequest},
     core::AgentPromptRequest,
     daemon::store::DaemonStore,
-    domain::EventType,
+    domain::{ContextAssemblyPurpose, EventType},
 };
 
 pub const API_VERSION: &str = "v1";
@@ -154,6 +155,33 @@ impl Daemon {
             EventType::MessageReceived,
             json!({ "message": user_message }),
         )?;
+        let assembled_context = self
+            .app
+            .context_engine
+            .assemble_context(ContextAssemblyRequest {
+                session_id: Some(params.session_id.clone()),
+                task_id: None,
+                budget_tokens: 8_000,
+                purpose: ContextAssemblyPurpose::Chat,
+                model_profile: None,
+            })
+            .map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::InternalError,
+                    format!("context assembly failed: {error}"),
+                    false,
+                )
+            })?;
+        self.record_event(
+            &params.session_id,
+            &turn_id,
+            EventType::ContextBuilt,
+            json!({
+                "block_count": assembled_context.blocks.len(),
+                "included_refs": assembled_context.included_refs,
+                "token_breakdown": assembled_context.token_breakdown,
+            }),
+        )?;
         self.record_event(
             &params.session_id,
             &turn_id,
@@ -167,12 +195,7 @@ impl Daemon {
             json!({ "provider_id": self.app.runtime.default_agent().provider_id }),
         )?;
 
-        let transcript = self
-            .store
-            .get_session(&params.session_id)
-            .ok_or_else(session_not_found)?
-            .messages;
-        let prompt = build_transcript_prompt(&transcript);
+        let prompt = build_context_prompt(&assembled_context, &user_message.content);
 
         let assistant_text = match self
             .app
@@ -256,7 +279,8 @@ impl Daemon {
         event_type: EventType,
         payload: Value,
     ) -> Result<(), ApiError> {
-        self.store
+        let event = self
+            .store
             .record_event(
                 session_id,
                 turn_id,
@@ -264,8 +288,17 @@ impl Daemon {
                 event_type,
                 payload,
             )
-            .map(|_| ())
-            .ok_or_else(session_not_found)
+            .ok_or_else(session_not_found)?;
+        self.app
+            .context_engine
+            .append_event(event)
+            .map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::InternalError,
+                    format!("context engine append failed: {error}"),
+                    false,
+                )
+            })
     }
 
     fn runtime_status(&self) -> RuntimeStatusResponse {
@@ -307,23 +340,22 @@ fn session_not_found() -> ApiError {
     ApiError::new(ApiErrorCode::SessionNotFound, "session not found", false)
 }
 
-fn build_transcript_prompt(messages: &[SessionMessage]) -> String {
+fn build_context_prompt(assembled: &AssembledContext, latest_user_message: &str) -> String {
     let mut prompt = String::from(
-        "You are continuing an existing conversation. Reply to the latest user message while staying consistent with the prior transcript.\n\nTranscript:\n",
+        "You are continuing an existing conversation. Use the provided context blocks and reply to the latest user message only.\n\nContext:\n",
     );
 
-    for message in messages {
-        let role = match message.role.as_str() {
-            "assistant" => "Assistant",
-            _ => "User",
-        };
-        prompt.push_str(role);
-        prompt.push_str(": ");
-        prompt.push_str(message.content.trim());
+    for block in &assembled.blocks {
+        prompt.push_str("[");
+        prompt.push_str(&block.block_id);
+        prompt.push_str("]\n");
+        prompt.push_str(block.content.trim());
         prompt.push_str("\n\n");
     }
 
-    prompt.push_str("Reply as the assistant to the latest user message only.");
+    prompt.push_str("Latest user message:\n");
+    prompt.push_str(latest_user_message.trim());
+    prompt.push_str("\n\nReply as the assistant to the latest user message only.");
     prompt
 }
 
