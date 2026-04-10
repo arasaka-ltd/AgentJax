@@ -9,7 +9,9 @@ use crate::{
         ApiError, ApiErrorCode, ApiMethod, ClientEnvelope, ConnectionId, HelloAckEnvelope,
         RequestEnvelope, ResponseEnvelope, RuntimePingResponse, RuntimeStatusResponse,
         ServerEnvelope, SessionGetRequest, SessionGetResponse, SessionListItem,
-        SessionListResponse, SessionMessage, SessionMessageAnnotation, SessionSendRequest,
+        SessionListResponse, SessionMessage, SessionMessageAnnotation, SessionModelInspectRequest,
+        SessionModelInspectResponse, SessionModelState, SessionModelSwitchRequest,
+        SessionModelSwitchResponse, SessionModelSwitchResult, SessionSendRequest,
         SessionSendResponse, StreamEnvelope, StreamPhase,
     },
     app::Application,
@@ -19,7 +21,9 @@ use crate::{
     },
     core::AgentPromptRequest,
     daemon::store::DaemonStore,
-    domain::{ContextAssemblyPurpose, EventType, Session, ToolCall, ToolCaller},
+    domain::{
+        ContextAssemblyPurpose, EventType, Session, SessionModelTarget, ToolCall, ToolCaller,
+    },
 };
 
 pub const API_VERSION: &str = "v1";
@@ -135,6 +139,12 @@ impl Daemon {
                     Vec::new(),
                 ))
             }
+            ApiMethod::SessionModelInspect => {
+                self.handle_session_model_inspect(request.parse_params()?)
+            }
+            ApiMethod::SessionModelSwitch => {
+                self.handle_session_model_switch(request.parse_params()?)
+            }
             ApiMethod::SessionSend => self.handle_session_send(request.parse_params()?).await,
             _ => Err(ApiError::new(
                 ApiErrorCode::UnsupportedMethod,
@@ -148,12 +158,180 @@ impl Daemon {
         &self,
         params: SessionSendRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let session_id = params.session_id.clone();
+        self.store
+            .mark_turn_active(&session_id)
+            .map_err(map_store_error)?;
+        let result = self.handle_session_send_inner(params).await;
+        self.store.clear_turn_active(&session_id);
+        result
+    }
+
+    fn handle_session_model_inspect(
+        &self,
+        params: SessionModelInspectRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let session = self
+            .store
+            .get_session(&params.session_id)
+            .map_err(internal_store_error)?
+            .ok_or_else(session_not_found)?;
+        Ok((
+            self.serialize(SessionModelInspectResponse {
+                session_id: params.session_id,
+                model: self.session_model_state(&session.session)?,
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_session_model_switch(
+        &self,
+        params: SessionModelSwitchRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let mut session = self
+            .store
+            .get_session(&params.session_id)
+            .map_err(internal_store_error)?
+            .ok_or_else(session_not_found)?
+            .session;
+        let requested = SessionModelTarget {
+            provider_id: params.provider_id,
+            model_id: params.model_id,
+        };
+
+        self.record_event(
+            &session.session_id,
+            session
+                .last_turn_id
+                .as_deref()
+                .unwrap_or("turn.model_switch"),
+            EventType::ModelSwitchRequested,
+            json!({
+                "requested_target": requested.clone(),
+            }),
+        )?;
+
+        if self.store.is_turn_active(&session.session_id) {
+            self.record_event(
+                &session.session_id,
+                session
+                    .last_turn_id
+                    .as_deref()
+                    .unwrap_or("turn.model_switch"),
+                EventType::ModelSwitchRejected,
+                json!({
+                    "reason": "active turn in progress",
+                    "requested_target": requested.clone(),
+                }),
+            )?;
+            return Ok((
+                self.serialize(SessionModelSwitchResponse {
+                    session_id: session.session_id.clone(),
+                    result: SessionModelSwitchResult::Rejected,
+                    model: self.session_model_state(&session)?,
+                    reason: Some("active turn in progress".into()),
+                })?,
+                Vec::new(),
+            ));
+        }
+
+        session.pending_model_switch = Some(requested.clone());
+        self.store
+            .upsert_session(session.clone())
+            .map_err(internal_store_error)?;
+
+        if let Err(error) = self
+            .app
+            .runtime
+            .validate_provider_model_binding(&requested.provider_id, &requested.model_id)
+        {
+            session.pending_model_switch = None;
+            self.store
+                .upsert_session(session.clone())
+                .map_err(internal_store_error)?;
+            self.record_event(
+                &session.session_id,
+                session
+                    .last_turn_id
+                    .as_deref()
+                    .unwrap_or("turn.model_switch"),
+                EventType::ModelSwitchRejected,
+                json!({
+                    "reason": error.to_string(),
+                    "requested_target": requested.clone(),
+                }),
+            )?;
+            return Ok((
+                self.serialize(SessionModelSwitchResponse {
+                    session_id: session.session_id.clone(),
+                    result: SessionModelSwitchResult::Rejected,
+                    model: self.session_model_state(&session)?,
+                    reason: Some(error.to_string()),
+                })?,
+                Vec::new(),
+            ));
+        }
+
+        session.current_provider_id = Some(requested.provider_id.clone());
+        session.current_model_id = Some(requested.model_id.clone());
+        session.pending_model_switch = None;
+        session.last_model_switched_at = Some(Utc::now());
+        session.meta.updated_at = Utc::now();
+        self.store
+            .upsert_session(session.clone())
+            .map_err(internal_store_error)?;
+
+        self.record_event(
+            &session.session_id,
+            session
+                .last_turn_id
+                .as_deref()
+                .unwrap_or("turn.model_switch"),
+            EventType::ModelSwitchApplied,
+            json!({
+                "current_target": {
+                    "provider_id": session.current_provider_id.clone(),
+                    "model_id": session.current_model_id.clone(),
+                }
+            }),
+        )?;
+
+        Ok((
+            self.serialize(SessionModelSwitchResponse {
+                session_id: session.session_id.clone(),
+                result: SessionModelSwitchResult::Applied,
+                model: self.session_model_state(&session)?,
+                reason: None,
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    async fn handle_session_send_inner(
+        &self,
+        params: SessionSendRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
         let turn_id = self.store.next_turn_id();
         let session = self
             .store
             .get_session(&params.session_id)
             .map_err(internal_store_error)?
             .ok_or_else(session_not_found)?;
+        let session_agent = self
+            .app
+            .runtime
+            .session_agent(
+                session.session.current_provider_id.as_deref(),
+                session.session.current_model_id.as_deref(),
+            )
+            .map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::InternalError,
+                    format!("failed to resolve session model: {error}"),
+                    false,
+                )
+            })?;
         let user_message = finalize_message(
             params.message,
             &session.session,
@@ -207,7 +385,10 @@ impl Daemon {
             &params.session_id,
             &turn_id,
             EventType::ModelCalled,
-            json!({ "provider_id": self.app.runtime.default_agent().provider_id }),
+            json!({
+                "provider_id": session_agent.provider_id.clone(),
+                "model_id": session_agent.model.clone(),
+            }),
         )?;
         let prompt_messages = recent_prompt_messages(
             &self
@@ -227,6 +408,7 @@ impl Daemon {
             .prompt_text(AgentPromptRequest {
                 prompt,
                 agent_id: Some(self.app.runtime.default_agent().agent_id.clone()),
+                agent_override: Some(session_agent.clone()),
             })
             .await
             .map_err(|error| {
@@ -253,7 +435,7 @@ impl Daemon {
             &first_response,
             &params.session_id,
             &turn_id,
-            &self.app.runtime.default_agent().agent_id,
+            &session_agent.agent_id,
         )? {
             let tool_result = self.execute_tool_call(&tool_call).await?;
             let followup_prompt = build_tool_followup_prompt(
@@ -270,7 +452,8 @@ impl Daemon {
                 &turn_id,
                 EventType::ModelCalled,
                 json!({
-                    "provider_id": self.app.runtime.default_agent().provider_id,
+                    "provider_id": session_agent.provider_id.clone(),
+                    "model_id": session_agent.model.clone(),
                     "phase": "after_tool",
                 }),
             )?;
@@ -280,6 +463,7 @@ impl Daemon {
                 .prompt_text(AgentPromptRequest {
                     prompt: followup_prompt,
                     agent_id: Some(self.app.runtime.default_agent().agent_id.clone()),
+                    agent_override: Some(session_agent.clone()),
                 })
                 .await
                 .map_err(|error| {
@@ -309,7 +493,7 @@ impl Daemon {
             self.store.next_message_id(),
             None,
         );
-        assistant_message.meta.actor_id = Some(self.app.runtime.default_agent().agent_id.clone());
+        assistant_message.meta.actor_id = Some(session_agent.agent_id.clone());
         self.store
             .append_message(&params.session_id, &turn_id, assistant_message.clone())
             .map_err(map_store_error)?;
@@ -443,6 +627,21 @@ impl Daemon {
             ready: self.store.ready(),
             draining: self.store.draining(),
         }
+    }
+
+    fn session_model_state(&self, session: &Session) -> Result<SessionModelState, ApiError> {
+        Ok(SessionModelState {
+            current: SessionModelTarget {
+                provider_id: session
+                    .resolved_provider_id(&self.app.runtime.default_agent().provider_id)
+                    .to_string(),
+                model_id: session
+                    .resolved_model_id(&self.app.runtime.default_agent().model)
+                    .to_string(),
+            },
+            pending: session.pending_model_switch.clone(),
+            last_switched_at: session.last_model_switched_at,
+        })
     }
 
     fn serialize<T: Serialize>(&self, value: T) -> Result<Value, ApiError> {
@@ -683,11 +882,15 @@ mod tests {
     };
 
     use crate::{
-        api::{ApiMethod, RequestEnvelope, RequestId},
+        api::{
+            ApiMethod, RequestEnvelope, RequestId, SessionModelInspectResponse,
+            SessionModelSwitchResponse, SessionModelSwitchResult,
+        },
         app::Application,
         config::{
-            ConfigRoot, OpenAiProviderConfig, RuntimeConfig, WorkspaceDocument,
-            WorkspaceIdentityPack, WorkspacePaths,
+            ConfigRoot, ModelCatalogSnapshot, ModelInfoSnapshot, OpenAiProviderConfig,
+            ProviderModelCatalog, RuntimeConfig, WorkspaceDocument, WorkspaceIdentityPack,
+            WorkspacePaths,
         },
     };
 
@@ -913,6 +1116,227 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn session_model_switch_persists_and_routes_session_send() {
+        let root = temp_path("session-model-switch");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&workspace_root).unwrap();
+
+        let active_server = spawn_server(vec![(
+            "POST /v1/responses HTTP/1.1".to_string(),
+            vec!["\"model\":\"gpt-4.1-mini\"".to_string()],
+            r#"{"id":"resp_switch","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4.1-mini","usage":null,"output":[{"id":"msg_switch","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"switched model reply","annotations":[]}]}],"tools":[]}"#.to_string(),
+        )])
+        .await;
+
+        let mut runtime_config =
+            test_runtime_config(&root, &workspace_root, Some("http://127.0.0.1:1".into()));
+        runtime_config.agent_runtime.llm.providers = vec![
+            crate::config::LlmProviderConfig::OpenAi(OpenAiProviderConfig {
+                provider_id: "openai-default".into(),
+                api_key: Some("test-key".into()),
+                api_key_env: "OPENAI_API_KEY".into(),
+                base_url: Some("http://127.0.0.1:1".into()),
+                organization: None,
+                project: None,
+            }),
+            crate::config::LlmProviderConfig::OpenAi(OpenAiProviderConfig {
+                provider_id: "openai-alt".into(),
+                api_key: Some("test-key".into()),
+                api_key_env: "OPENAI_API_KEY".into(),
+                base_url: Some(format!("http://{}", active_server.0)),
+                organization: None,
+                project: None,
+            }),
+        ];
+        runtime_config.agent_runtime.llm.model_catalog = model_catalog_snapshot(vec![
+            provider_snapshot(
+                "openai-default",
+                "http://127.0.0.1:1/v1",
+                vec!["gpt-4o-mini"],
+            ),
+            provider_snapshot(
+                "openai-alt",
+                &format!("http://{}/v1", active_server.0),
+                vec!["gpt-4.1-mini"],
+            ),
+        ]);
+
+        let identity = test_identity(&workspace_root);
+        let daemon = Daemon::new(Application::new(
+            ConfigRoot::new(root.join("config")),
+            runtime_config.clone(),
+            identity.clone(),
+        ))
+        .unwrap();
+
+        let switch = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_switch".into()),
+                method: ApiMethod::SessionModelSwitch,
+                params: serde_json::json!({
+                    "session_id": "session.default",
+                    "provider_id": "openai-alt",
+                    "model_id": "gpt-4.1-mini",
+                }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(switch_response) = switch.response else {
+            panic!("expected response envelope");
+        };
+        let switch_result: SessionModelSwitchResponse =
+            serde_json::from_value(switch_response.result.unwrap()).unwrap();
+        assert_eq!(switch_result.result, SessionModelSwitchResult::Applied);
+        assert_eq!(switch_result.model.current.provider_id, "openai-alt");
+        assert_eq!(switch_result.model.current.model_id, "gpt-4.1-mini");
+
+        let send = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_switch_send".into()),
+                method: ApiMethod::SessionSend,
+                params: serde_json::json!({
+                    "session_id": "session.default",
+                    "message": { "role": "user", "content": "use switched model" },
+                    "stream": false,
+                }),
+                meta: None,
+            })
+            .await;
+        assert!(matches!(
+            send.response,
+            crate::api::ServerEnvelope::Response(_)
+        ));
+
+        let inspect = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_inspect".into()),
+                method: ApiMethod::SessionModelInspect,
+                params: serde_json::json!({ "session_id": "session.default" }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(inspect_response) = inspect.response else {
+            panic!("expected response envelope");
+        };
+        let inspect_result: SessionModelInspectResponse =
+            serde_json::from_value(inspect_response.result.unwrap()).unwrap();
+        assert_eq!(inspect_result.model.current.provider_id, "openai-alt");
+        assert_eq!(inspect_result.model.current.model_id, "gpt-4.1-mini");
+
+        let get = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_switch_get".into()),
+                method: ApiMethod::SessionGet,
+                params: serde_json::json!({ "session_id": "session.default" }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(get_response) = get.response else {
+            panic!("expected response envelope");
+        };
+        let session: crate::api::SessionGetResponse =
+            serde_json::from_value(get_response.result.unwrap()).unwrap();
+        assert_eq!(
+            session.session.current_provider_id.as_deref(),
+            Some("openai-alt")
+        );
+        assert_eq!(
+            session.session.current_model_id.as_deref(),
+            Some("gpt-4.1-mini")
+        );
+        assert!(session
+            .events
+            .iter()
+            .any(|event| event.event_type == crate::domain::EventType::ModelSwitchRequested));
+        assert!(session
+            .events
+            .iter()
+            .any(|event| event.event_type == crate::domain::EventType::ModelSwitchApplied));
+
+        drop(daemon);
+        let restarted = Daemon::new(Application::new(
+            ConfigRoot::new(root.join("config")),
+            runtime_config,
+            identity,
+        ))
+        .unwrap();
+        let inspect_after_restart = restarted
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_inspect_restart".into()),
+                method: ApiMethod::SessionModelInspect,
+                params: serde_json::json!({ "session_id": "session.default" }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(inspect_restart_response) =
+            inspect_after_restart.response
+        else {
+            panic!("expected response envelope");
+        };
+        let inspect_after_restart_result: SessionModelInspectResponse =
+            serde_json::from_value(inspect_restart_response.result.unwrap()).unwrap();
+        assert_eq!(
+            inspect_after_restart_result.model.current.provider_id,
+            "openai-alt"
+        );
+        assert_eq!(
+            inspect_after_restart_result.model.current.model_id,
+            "gpt-4.1-mini"
+        );
+
+        active_server.1.abort();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn session_model_switch_rejects_when_turn_is_active() {
+        let root = temp_path("session-model-switch-reject");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&workspace_root).unwrap();
+
+        let mut runtime_config =
+            test_runtime_config(&root, &workspace_root, Some("http://127.0.0.1:1".into()));
+        runtime_config.agent_runtime.llm.model_catalog =
+            model_catalog_snapshot(vec![provider_snapshot(
+                "openai-default",
+                "http://127.0.0.1:1/v1",
+                vec!["gpt-4o-mini"],
+            )]);
+
+        let daemon = Daemon::new(Application::new(
+            ConfigRoot::new(root.join("config")),
+            runtime_config,
+            test_identity(&workspace_root),
+        ))
+        .unwrap();
+
+        daemon.store.mark_turn_active("session.default").unwrap();
+        let switch = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_switch_reject".into()),
+                method: ApiMethod::SessionModelSwitch,
+                params: serde_json::json!({
+                    "session_id": "session.default",
+                    "provider_id": "openai-default",
+                    "model_id": "gpt-4o-mini",
+                }),
+                meta: None,
+            })
+            .await;
+        daemon.store.clear_turn_active("session.default");
+
+        let crate::api::ServerEnvelope::Response(response) = switch.response else {
+            panic!("expected response envelope");
+        };
+        let result: SessionModelSwitchResponse =
+            serde_json::from_value(response.result.unwrap()).unwrap();
+        assert_eq!(result.result, SessionModelSwitchResult::Rejected);
+        assert_eq!(result.reason.as_deref(), Some("active turn in progress"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn doc(path: PathBuf, content: &str) -> WorkspaceDocument {
         WorkspaceDocument {
             path,
@@ -965,6 +1389,36 @@ mod tests {
             mission: doc(workspace_root.join("MISSION.md"), ""),
             rules: doc(workspace_root.join("RULES.md"), ""),
             router: doc(workspace_root.join("ROUTER.md"), ""),
+        }
+    }
+
+    fn model_catalog_snapshot(providers: Vec<ProviderModelCatalog>) -> ModelCatalogSnapshot {
+        ModelCatalogSnapshot {
+            generated_at: Some(chrono::Utc::now()),
+            providers,
+        }
+    }
+
+    fn provider_snapshot(
+        provider_id: &str,
+        base_url: &str,
+        model_ids: Vec<&str>,
+    ) -> ProviderModelCatalog {
+        ProviderModelCatalog {
+            provider_id: provider_id.into(),
+            provider_kind: "openai".into(),
+            base_url: Some(base_url.into()),
+            language_models: model_ids
+                .into_iter()
+                .map(|model_id| ModelInfoSnapshot {
+                    model_id: model_id.into(),
+                    display_label: model_id.into(),
+                    context_length: Some(128000),
+                    input_token_limit: Some(128000),
+                    output_token_limit: Some(16384),
+                    capability_tags: vec!["text".into()],
+                })
+                .collect(),
         }
     }
 

@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 
 use crate::api::{StreamId, SubscriptionId};
 use crate::domain::{
-    Agent, AgentStatus, Node, NodeStatus, PluginDescriptor, Schedule, Session, SessionStatus, Task,
-    TaskStatus,
+    Agent, AgentStatus, Node, NodeStatus, PluginDescriptor, Schedule, Session, SessionModelTarget,
+    SessionStatus, Task, TaskStatus,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -41,6 +41,10 @@ pub enum ApiMethod {
     SessionGet,
     #[serde(rename = "session.send")]
     SessionSend,
+    #[serde(rename = "session.model.inspect")]
+    SessionModelInspect,
+    #[serde(rename = "session.model.switch")]
+    SessionModelSwitch,
     #[serde(rename = "session.cancel")]
     SessionCancel,
     #[serde(rename = "session.subscribe")]
@@ -99,6 +103,8 @@ impl ApiMethod {
             Self::SessionList => "session.list",
             Self::SessionGet => "session.get",
             Self::SessionSend => "session.send",
+            Self::SessionModelInspect => "session.model.inspect",
+            Self::SessionModelSwitch => "session.model.switch",
             Self::SessionCancel => "session.cancel",
             Self::SessionSubscribe => "session.subscribe",
             Self::TaskList => "task.list",
@@ -403,6 +409,50 @@ pub struct SessionSendResponse {
     pub turn_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_id: Option<StreamId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionModelInspectRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionModelState {
+    pub current: SessionModelTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<SessionModelTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_switched_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionModelInspectResponse {
+    pub session_id: String,
+    pub model: SessionModelState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionModelSwitchRequest {
+    pub session_id: String,
+    pub provider_id: String,
+    pub model_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionModelSwitchResult {
+    Pending,
+    Applied,
+    Rejected,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionModelSwitchResponse {
+    pub session_id: String,
+    pub result: SessionModelSwitchResult,
+    pub model: SessionModelState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

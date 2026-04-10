@@ -52,6 +52,9 @@ pub enum EventType {
     UsageRecorded,
     TurnSucceeded,
     TurnFailed,
+    ModelSwitchRequested,
+    ModelSwitchApplied,
+    ModelSwitchRejected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

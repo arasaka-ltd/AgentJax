@@ -39,7 +39,7 @@ pub use policies::{
 };
 pub use resource::{Resource, ResourceId, ResourceKind, ResourceStatus};
 pub use schedule::{Schedule, TaskTarget, TaskTrigger};
-pub use session::{Session, SessionMode, SessionStatus};
+pub use session::{Session, SessionMode, SessionModelTarget, SessionStatus};
 pub use skill::{Skill, SkillTrigger};
 pub use summary::{InvalidationStatus, ResumePack, SummaryNode, SummaryStatus, SummaryType};
 pub use task::{Task, TaskPhase, TaskPriority, TaskStatus};

@@ -213,16 +213,39 @@ impl ConfigLoader {
 
     pub fn write_model_snapshot(
         config_root: &ConfigRoot,
-        provider_id: &str,
-        model_id: &str,
+        _provider_id: &str,
         snapshot: ModelCatalogSnapshot,
     ) -> Result<()> {
+        let existing: ModelsTomlConfig = if config_root.models_config.exists() {
+            toml::from_str(&fs::read_to_string(&config_root.models_config)?)?
+        } else {
+            ModelsTomlConfig {
+                defaults: ModelsDefaultsConfig {
+                    provider_id: "openai-default".into(),
+                    model_id: "gpt-4o-mini".into(),
+                },
+                snapshot: ModelCatalogSnapshot::default(),
+            }
+        };
+
+        let mut providers = existing.snapshot.providers;
+        for incoming in snapshot.providers {
+            if let Some(index) = providers
+                .iter()
+                .position(|provider| provider.provider_id == incoming.provider_id)
+            {
+                providers[index] = incoming;
+            } else {
+                providers.push(incoming);
+            }
+        }
+
         let config = ModelsTomlConfig {
-            defaults: ModelsDefaultsConfig {
-                provider_id: provider_id.into(),
-                model_id: model_id.into(),
+            defaults: existing.defaults,
+            snapshot: ModelCatalogSnapshot {
+                generated_at: snapshot.generated_at,
+                providers,
             },
-            snapshot,
         };
         fs::write(&config_root.models_config, toml::to_string_pretty(&config)?)?;
         Ok(())
@@ -249,6 +272,10 @@ mod tests {
         fs,
         path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use crate::config::{
+        ConfigRoot, ModelCatalogSnapshot, ModelInfoSnapshot, ProviderModelCatalog,
     };
 
     use super::{ConfigLoader, InitMode};
@@ -283,6 +310,52 @@ mod tests {
         assert!(config_root.join("resources.toml").exists());
         assert!(config_root.join("daemon.toml").exists());
         assert!(workspace_root.join("AGENT.md").exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn write_model_snapshot_preserves_existing_defaults() {
+        let root = temp_path("model-snapshot");
+        let config_root = root.join("config");
+        let runtime_root = root.join("runtime");
+        let workspace_root = root.join("workspace");
+
+        ConfigLoader::initialize_at(
+            &config_root,
+            &runtime_root,
+            &workspace_root,
+            InitMode::Minimal,
+        )
+        .unwrap();
+
+        let root_config = ConfigRoot::new(&config_root);
+        ConfigLoader::write_model_snapshot(
+            &root_config,
+            "openai-alt",
+            ModelCatalogSnapshot {
+                generated_at: Some(chrono::Utc::now()),
+                providers: vec![ProviderModelCatalog {
+                    provider_id: "openai-alt".into(),
+                    provider_kind: "openai".into(),
+                    base_url: Some("http://127.0.0.1:9999/v1".into()),
+                    language_models: vec![ModelInfoSnapshot {
+                        model_id: "gpt-alt".into(),
+                        display_label: "GPT Alt".into(),
+                        context_length: Some(128000),
+                        input_token_limit: Some(128000),
+                        output_token_limit: Some(16384),
+                        capability_tags: vec!["text".into()],
+                    }],
+                }],
+            },
+        )
+        .unwrap();
+
+        let models_toml = fs::read_to_string(root_config.models_config).unwrap();
+        assert!(models_toml.contains("provider_id = \"openai-default\""));
+        assert!(models_toml.contains("model_id = \"gpt-4o-mini\""));
+        assert!(models_toml.contains("provider_id = \"openai-alt\""));
 
         let _ = fs::remove_dir_all(root);
     }

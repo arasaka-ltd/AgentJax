@@ -1,7 +1,8 @@
 use std::{
+    collections::BTreeSet,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Instant,
 };
@@ -30,6 +31,7 @@ pub struct DaemonStore {
     next_turn: AtomicU64,
     next_event: AtomicU64,
     next_stream: AtomicU64,
+    active_turn_sessions: Mutex<BTreeSet<String>>,
     persistence: Arc<dyn PersistenceStore>,
 }
 
@@ -48,6 +50,7 @@ impl DaemonStore {
             next_turn: AtomicU64::new(1),
             next_event: AtomicU64::new(1),
             next_stream: AtomicU64::new(1),
+            active_turn_sessions: Mutex::new(BTreeSet::new()),
             persistence,
         };
         store.ensure_default_session()?;
@@ -107,6 +110,35 @@ impl DaemonStore {
     ) -> Result<Session> {
         self.persistence
             .append_message(session_id, turn_id, message)
+    }
+
+    pub fn upsert_session(&self, session: Session) -> Result<Session> {
+        self.persistence.upsert_session(session)
+    }
+
+    pub fn mark_turn_active(&self, session_id: &str) -> Result<()> {
+        let mut active = self
+            .active_turn_sessions
+            .lock()
+            .expect("active_turn_sessions lock poisoned");
+        if !active.insert(session_id.to_string()) {
+            return Err(anyhow::anyhow!("session turn already active: {session_id}"));
+        }
+        Ok(())
+    }
+
+    pub fn clear_turn_active(&self, session_id: &str) {
+        self.active_turn_sessions
+            .lock()
+            .expect("active_turn_sessions lock poisoned")
+            .remove(session_id);
+    }
+
+    pub fn is_turn_active(&self, session_id: &str) -> bool {
+        self.active_turn_sessions
+            .lock()
+            .expect("active_turn_sessions lock poisoned")
+            .contains(session_id)
     }
 
     pub fn record_event(
@@ -220,5 +252,15 @@ fn default_session(runtime_config: &RuntimeConfig) -> Session {
         mode: SessionMode::Interactive,
         status: SessionStatus::Idle,
         last_turn_id: None,
+        current_provider_id: Some(
+            runtime_config
+                .agent_runtime
+                .default_agent
+                .provider_id
+                .clone(),
+        ),
+        current_model_id: Some(runtime_config.agent_runtime.default_agent.model.clone()),
+        pending_model_switch: None,
+        last_model_switched_at: None,
     }
 }

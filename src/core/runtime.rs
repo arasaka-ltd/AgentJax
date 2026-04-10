@@ -14,6 +14,7 @@ pub struct ApplicationRuntime {
 pub struct AgentPromptRequest {
     pub prompt: String,
     pub agent_id: Option<String>,
+    pub agent_override: Option<AgentDefinition>,
 }
 
 impl ApplicationRuntime {
@@ -46,10 +47,63 @@ impl ApplicationRuntime {
     }
 
     pub async fn prompt_text(&self, request: AgentPromptRequest) -> Result<String> {
-        let agent = self.resolve_agent(request.agent_id.as_deref())?;
+        if let Some(agent) = request.agent_override.as_ref() {
+            self.validate_agent_binding(agent)?;
+        }
+        let agent = match request.agent_override.as_ref() {
+            Some(agent) => agent,
+            None => self.resolve_agent(request.agent_id.as_deref())?,
+        };
         self.resolve_provider(&agent.provider_id)?
             .prompt_text(agent, &request.prompt)
             .await
+    }
+
+    pub fn session_agent(
+        &self,
+        provider_id: Option<&str>,
+        model_id: Option<&str>,
+    ) -> Result<AgentDefinition> {
+        let mut agent = self.default_agent().clone();
+        if let Some(provider_id) = provider_id {
+            agent.provider_id = provider_id.to_string();
+        }
+        if let Some(model_id) = model_id {
+            agent.model = model_id.to_string();
+        }
+        self.resolve_provider(&agent.provider_id)?;
+        Ok(agent)
+    }
+
+    pub fn validate_provider_model_binding(&self, provider_id: &str, model_id: &str) -> Result<()> {
+        self.resolve_provider(provider_id)?;
+        let provider_snapshot = self
+            .config
+            .agent_runtime
+            .llm
+            .model_catalog
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == provider_id)
+            .ok_or_else(|| anyhow!("provider snapshot not found: {provider_id}"))?;
+
+        if provider_snapshot.language_models.is_empty() {
+            return Err(anyhow!(
+                "provider snapshot has no language models: {provider_id}"
+            ));
+        }
+
+        if provider_snapshot
+            .language_models
+            .iter()
+            .any(|model| model.model_id == model_id)
+        {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "model {model_id} is not available for provider {provider_id}"
+            ))
+        }
     }
 
     fn resolve_agent(&self, agent_id: Option<&str>) -> Result<&AgentDefinition> {
@@ -70,6 +124,11 @@ impl ApplicationRuntime {
             .registry()
             .provider(provider_id)
             .ok_or_else(|| anyhow!("unknown provider id: {provider_id}"))
+    }
+
+    fn validate_agent_binding(&self, agent: &AgentDefinition) -> Result<()> {
+        self.resolve_provider(&agent.provider_id)?;
+        Ok(())
     }
 }
 

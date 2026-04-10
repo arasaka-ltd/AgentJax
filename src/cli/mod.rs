@@ -299,22 +299,9 @@ async fn load_or_refresh_model_catalog(
 
     let adapter = openai_adapter_from_loaded(loaded, provider_id)?;
     let catalog = adapter.list_models().await?;
-    let default_model = catalog
-        .language_models
-        .first()
-        .map(|model| model.model_id.clone())
-        .unwrap_or_else(|| {
-            loaded
-                .runtime_config
-                .agent_runtime
-                .default_agent
-                .model
-                .clone()
-        });
     ConfigLoader::write_model_snapshot(
         &loaded.config_root,
         provider_id,
-        &default_model,
         adapter.to_snapshot(&catalog),
     )?;
     Ok(catalog)

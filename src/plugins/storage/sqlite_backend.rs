@@ -14,12 +14,17 @@ use crate::{
     api::{SessionMessage, SessionMessageKind, SessionMessageMeta},
     config::RuntimeConfig,
     core::{EventStore, SessionRecord, SessionStore},
-    domain::{EventSource, EventType, RuntimeEvent, Session, SessionMode, SessionStatus},
+    domain::{
+        EventSource, EventType, RuntimeEvent, Session, SessionMode, SessionModelTarget,
+        SessionStatus,
+    },
 };
 
 const INITIAL_MIGRATION_VERSION: &str = "2026_04_10_0001_initial_session_event_persistence";
 const INITIAL_MIGRATION_DESCRIPTION: &str =
     "initial session, message, and runtime event persistence";
+const MODEL_SWITCH_MIGRATION_VERSION: &str = "2026_04_10_0002_session_model_switching";
+const MODEL_SWITCH_MIGRATION_DESCRIPTION: &str = "add session model binding columns";
 
 const INITIAL_MIGRATION_SQL: &str = r#"
 CREATE TABLE sessions (
@@ -84,6 +89,14 @@ CREATE INDEX idx_runtime_events_session_time ON runtime_events(session_id, occur
 CREATE INDEX idx_runtime_events_turn_id ON runtime_events(turn_id);
 CREATE INDEX idx_runtime_events_task_id ON runtime_events(task_id);
 CREATE INDEX idx_runtime_events_type_time ON runtime_events(event_type, occurred_at);
+"#;
+
+const MODEL_SWITCH_MIGRATION_SQL: &str = r#"
+ALTER TABLE sessions ADD COLUMN current_provider_id TEXT NULL;
+ALTER TABLE sessions ADD COLUMN current_model_id TEXT NULL;
+ALTER TABLE sessions ADD COLUMN pending_provider_id TEXT NULL;
+ALTER TABLE sessions ADD COLUMN pending_model_id TEXT NULL;
+ALTER TABLE sessions ADD COLUMN last_model_switched_at TEXT NULL;
 "#;
 
 #[derive(Debug, Clone)]
@@ -170,23 +183,34 @@ impl SqlitePersistence {
             versions
         };
 
-        if !applied_versions.contains(INITIAL_MIGRATION_VERSION) {
+        for (version, description, sql) in [
+            (
+                INITIAL_MIGRATION_VERSION,
+                INITIAL_MIGRATION_DESCRIPTION,
+                INITIAL_MIGRATION_SQL,
+            ),
+            (
+                MODEL_SWITCH_MIGRATION_VERSION,
+                MODEL_SWITCH_MIGRATION_DESCRIPTION,
+                MODEL_SWITCH_MIGRATION_SQL,
+            ),
+        ] {
+            if applied_versions.contains(version) {
+                continue;
+            }
+
             let tx = connection
                 .transaction()
                 .context("failed to begin sqlite migration transaction")?;
-            tx.execute_batch(INITIAL_MIGRATION_SQL)
-                .context("failed to apply initial sqlite persistence migration")?;
+            tx.execute_batch(sql)
+                .with_context(|| format!("failed to apply sqlite migration {version}"))?;
             tx.execute(
                 "INSERT INTO schema_migrations (version, applied_at, description) VALUES (?1, ?2, ?3)",
-                params![
-                    INITIAL_MIGRATION_VERSION,
-                    Utc::now().to_rfc3339(),
-                    INITIAL_MIGRATION_DESCRIPTION,
-                ],
+                params![version, Utc::now().to_rfc3339(), description],
             )
-            .context("failed to record initial sqlite persistence migration")?;
+            .with_context(|| format!("failed to record sqlite migration {version}"))?;
             tx.commit()
-                .context("failed to commit initial sqlite persistence migration")?;
+                .with_context(|| format!("failed to commit sqlite migration {version}"))?;
         }
 
         Ok(())
@@ -217,7 +241,9 @@ impl SqlitePersistence {
         self.with_connection(|connection| {
             let mut stmt = connection.prepare(
                 "SELECT session_id, workspace_id, agent_id, channel_id, surface_id, user_id,
-                        title, mode, status, last_turn_id, created_at, updated_at, schema_version, meta_json
+                        title, mode, status, last_turn_id, current_provider_id, current_model_id,
+                        pending_provider_id, pending_model_id, last_model_switched_at,
+                        created_at, updated_at, schema_version, meta_json
                  FROM sessions
                  ORDER BY updated_at DESC, created_at DESC, session_id ASC",
             )?;
@@ -449,7 +475,9 @@ fn nullable_str(value: &str) -> Option<&str> {
 fn select_session(conn: &Connection, session_id: &str) -> Result<Option<Session>> {
     let mut stmt = conn.prepare(
         "SELECT session_id, workspace_id, agent_id, channel_id, surface_id, user_id,
-                title, mode, status, last_turn_id, created_at, updated_at, schema_version, meta_json
+                title, mode, status, last_turn_id, current_provider_id, current_model_id,
+                pending_provider_id, pending_model_id, last_model_switched_at,
+                created_at, updated_at, schema_version, meta_json
          FROM sessions
          WHERE session_id = ?1",
     )?;
@@ -557,8 +585,9 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> Result<()> {
     conn.execute(
         "INSERT INTO sessions (
             session_id, workspace_id, agent_id, channel_id, surface_id, user_id, title, mode,
-            status, last_turn_id, created_at, updated_at, schema_version, meta_json
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            status, last_turn_id, current_provider_id, current_model_id, pending_provider_id,
+            pending_model_id, last_model_switched_at, created_at, updated_at, schema_version, meta_json
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
          ON CONFLICT(session_id) DO UPDATE SET
             workspace_id = excluded.workspace_id,
             agent_id = excluded.agent_id,
@@ -569,6 +598,11 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> Result<()> {
             mode = excluded.mode,
             status = excluded.status,
             last_turn_id = excluded.last_turn_id,
+            current_provider_id = excluded.current_provider_id,
+            current_model_id = excluded.current_model_id,
+            pending_provider_id = excluded.pending_provider_id,
+            pending_model_id = excluded.pending_model_id,
+            last_model_switched_at = excluded.last_model_switched_at,
             created_at = excluded.created_at,
             updated_at = excluded.updated_at,
             schema_version = excluded.schema_version,
@@ -584,6 +618,19 @@ fn upsert_session_row(conn: &Connection, session: &Session) -> Result<()> {
             session_mode_to_str(&session.mode),
             session_status_to_str(&session.status),
             &session.last_turn_id,
+            &session.current_provider_id,
+            &session.current_model_id,
+            session
+                .pending_model_switch
+                .as_ref()
+                .map(|target| target.provider_id.clone()),
+            session
+                .pending_model_switch
+                .as_ref()
+                .map(|target| target.model_id.clone()),
+            session
+                .last_model_switched_at
+                .map(|timestamp| timestamp.to_rfc3339()),
             session.meta.created_at.to_rfc3339(),
             session.meta.updated_at.to_rfc3339(),
             &session.meta.schema_version,
@@ -621,7 +668,29 @@ fn read_session_row(row: &Row<'_>) -> rusqlite::Result<Session> {
         mode: parse_session_mode(&row.get::<_, String>("mode")?).map_err(into_sql_err)?,
         status: parse_session_status(&row.get::<_, String>("status")?).map_err(into_sql_err)?,
         last_turn_id: row.get("last_turn_id")?,
+        current_provider_id: row.get("current_provider_id")?,
+        current_model_id: row.get("current_model_id")?,
+        pending_model_switch: pending_model_switch_from_row(row)?,
+        last_model_switched_at: row
+            .get::<_, Option<String>>("last_model_switched_at")?
+            .map(|timestamp| parse_datetime(&timestamp).map_err(into_sql_err))
+            .transpose()?,
     })
+}
+
+fn pending_model_switch_from_row(row: &Row<'_>) -> rusqlite::Result<Option<SessionModelTarget>> {
+    let pending_provider_id: Option<String> = row.get("pending_provider_id")?;
+    let pending_model_id: Option<String> = row.get("pending_model_id")?;
+    match (pending_provider_id, pending_model_id) {
+        (Some(provider_id), Some(model_id)) => Ok(Some(SessionModelTarget {
+            provider_id,
+            model_id,
+        })),
+        (None, None) => Ok(None),
+        _ => Err(into_sql_err(anyhow!(
+            "invalid session pending model switch columns"
+        ))),
+    }
 }
 
 fn parse_datetime(value: &str) -> Result<DateTime<Utc>> {
@@ -725,6 +794,9 @@ fn event_type_to_str(value: &EventType) -> &'static str {
         EventType::UsageRecorded => "usage_recorded",
         EventType::TurnSucceeded => "turn_succeeded",
         EventType::TurnFailed => "turn_failed",
+        EventType::ModelSwitchRequested => "model_switch_requested",
+        EventType::ModelSwitchApplied => "model_switch_applied",
+        EventType::ModelSwitchRejected => "model_switch_rejected",
     }
 }
 
@@ -758,6 +830,9 @@ fn parse_event_type(value: &str) -> Result<EventType> {
         "usage_recorded" => Ok(EventType::UsageRecorded),
         "turn_succeeded" => Ok(EventType::TurnSucceeded),
         "turn_failed" => Ok(EventType::TurnFailed),
+        "model_switch_requested" => Ok(EventType::ModelSwitchRequested),
+        "model_switch_applied" => Ok(EventType::ModelSwitchApplied),
+        "model_switch_rejected" => Ok(EventType::ModelSwitchRejected),
         _ => Err(anyhow!("unknown runtime event type: {value}")),
     }
 }

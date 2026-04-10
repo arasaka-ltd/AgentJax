@@ -148,31 +148,31 @@
 - [x] 保持 TUI 仍然是 out-of-process core surface，而不是 plugin channel
 
 ## Batch 3.6: Model Switching Foundation
-- [ ] 修正模型目录刷新逻辑，避免 `models list --refresh` 覆盖用户显式设置的默认模型
-- [ ] 定义 session 级模型绑定基础字段：
+- [x] 修正模型目录刷新逻辑，避免 `models list --refresh` 覆盖用户显式设置的默认模型
+- [x] 定义 session 级模型绑定基础字段：
   - current provider id
   - current model id
   - optional pending switch target
   - last switched at
-- [ ] 将 session 模型绑定纳入持久化层：
+- [x] 将 session 模型绑定纳入持久化层：
   - sqlite session schema
   - session load/save
   - daemon default session bootstrap
-- [ ] 让 runtime 在 `session.send` 时按 session 当前模型解析 provider/model，而不是只读全局 default agent
-- [ ] 为模型切换预留最小状态机：
+- [x] 让 runtime 在 `session.send` 时按 session 当前模型解析 provider/model，而不是只读全局 default agent
+- [x] 为模型切换预留最小状态机：
   - idle 可切换
   - active turn 期间拒绝切换
   - pending / applied / rejected 基本结果
-- [ ] 为后续 slash 指令预留 daemon API / application service 落点：
+- [x] 为后续 slash 指令预留 daemon API / application service 落点：
   - inspect current session model
   - request session model switch
   - validate provider/model exists before apply
-- [ ] 为模型切换记录最小事件：
+- [x] 为模型切换记录最小事件：
   - model_switch_requested
   - model_switch_applied
   - model_switch_rejected
-- [ ] 保持这条能力是“模型热切换底层基础”，不在本批直接实现 slash 命令解析
-- [ ] 为默认模型、session override、重启恢复补最小回归测试
+- [x] 保持这条能力是“模型热切换底层基础”，不在本批直接实现 slash 命令解析
+- [x] 为默认模型、session override、重启恢复补最小回归测试
 
 ## Batch 4: Memory / RAG v0
 - [ ] 实现 `MEMORY.md` + `memory/topics/` 的最小读取召回
