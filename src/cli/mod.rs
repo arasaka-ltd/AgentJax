@@ -174,7 +174,7 @@ pub async fn run() -> Result<()> {
 
 async fn run_daemon(unix_socket: PathBuf, ws_bind: String, no_ws: bool) -> Result<()> {
     let app = bootstrap_application()?;
-    let daemon = Daemon::new(app);
+    let daemon = Daemon::new(app)?;
     let unix_server = UnixSocketServer::new(daemon.clone(), unix_socket);
 
     if no_ws {

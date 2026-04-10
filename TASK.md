@@ -128,11 +128,12 @@
 - [x] 子改进：保证用户原文内容与程序推断字段分离，避免模型把推断当事实
 
 ## Batch 3: Session / Event Persistence
-- [ ] 落地 `sqlite_sessions` 最小实现
-- [ ] 落地 `sqlite_context` 最小实现
-- [ ] 将当前内存 `DaemonStore` 迁到可持久化后端或其抽象层之上
-- [ ] 重启 daemon 后仍可恢复 session/messages/events
-- [ ] 将 `session.list` / `session.get` / `session.send` 统一走存储抽象
+- [x] 撰写 `docs/SESSION_EVENT_PERSISTENCE_SPEC.md`
+- [x] 落地 `sqlite_sessions` 最小实现
+- [x] 落地 `sqlite_context` 最小实现
+- [x] 将当前内存 `DaemonStore` 迁到可持久化后端或其抽象层之上
+- [x] 重启 daemon 后仍可恢复 session/messages/events
+- [x] 将 `session.list` / `session.get` / `session.send` 统一走存储抽象
 
 ## Batch 4: Memory / RAG v0
 - [ ] 实现 `MEMORY.md` + `memory/topics/` 的最小读取召回

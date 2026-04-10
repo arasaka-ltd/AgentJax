@@ -123,10 +123,17 @@
 做完的判定标准：
 - session/messages/events 已经不是纯内存
 - `session.list` / `session.get` / `session.send` 走统一存储抽象
+- 持久化边界、表结构、迁移策略已由专门 spec 钉死
 
 为什么不是第一批：
 - 先做 persona/context/tool，能更快验证 runtime 方向对不对
 - 但持久化必须尽快跟上，否则后面所有 runtime 能力都不稳
+
+开工顺序建议：
+1. 先完成 `docs/SESSION_EVENT_PERSISTENCE_SPEC.md`
+2. 再定义 store traits
+3. 再落 SQLite schema 与 migrations
+4. 最后替换当前内存 `DaemonStore`
 
 ### Batch 4：Memory / RAG v0
 目标：

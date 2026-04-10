@@ -140,6 +140,15 @@ AgentJax 当前的正式架构规范由以下文档组成。
   - prompt document / section / fragment 中间层
   - tool / memory / knowledge / task 的 XML 注入格式
   - `assemble_context()` 与 `render_prompt_xml()` 的分层
+### Spec 12：Session / Event Persistence
+- `docs/SESSION_EVENT_PERSISTENCE_SPEC.md`
+- 作用：定义 Batch 3 的 session / message / event 持久化边界、SQLite schema 与迁移策略
+- 包括：
+  - sessions / session_messages / runtime_events / schema_migrations
+  - store traits
+  - transaction / consistency boundary
+  - migration strategy
+  - Batch 3 最小验收标准
 ---
 ## 2.5 执行入口文件
 从这一轮开始，除了正式 spec 外，还必须配合两份执行文档：

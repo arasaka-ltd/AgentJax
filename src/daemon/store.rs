@@ -1,21 +1,23 @@
 use std::{
-    collections::BTreeMap,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Mutex,
+        Arc,
     },
     time::Instant,
 };
 
+use anyhow::Result;
 use chrono::Utc;
 use serde_json::Value;
 
 use crate::{
     api::SessionMessage,
     config::RuntimeConfig,
+    core::{EventStore, PersistenceStore, SessionRecord, SessionStore},
     domain::{
         EventSource, EventType, ObjectMeta, RuntimeEvent, Session, SessionMode, SessionStatus,
     },
+    plugins::storage::sqlite_backend::SqlitePersistence,
 };
 
 pub struct DaemonStore {
@@ -28,30 +30,15 @@ pub struct DaemonStore {
     next_turn: AtomicU64,
     next_event: AtomicU64,
     next_stream: AtomicU64,
-    sessions: Mutex<BTreeMap<String, SessionState>>,
-}
-
-#[derive(Clone)]
-pub struct SessionState {
-    pub session: Session,
-    pub messages: Vec<SessionMessage>,
-    pub events: Vec<RuntimeEvent>,
+    persistence: Arc<dyn PersistenceStore>,
 }
 
 impl DaemonStore {
-    pub fn new(runtime_config: RuntimeConfig) -> Self {
-        let default_session = default_session(&runtime_config);
-        let mut sessions = BTreeMap::new();
-        sessions.insert(
-            default_session.session_id.clone(),
-            SessionState {
-                session: default_session,
-                messages: Vec::new(),
-                events: Vec::new(),
-            },
-        );
+    pub fn new(runtime_config: RuntimeConfig) -> Result<Self> {
+        let sqlite = SqlitePersistence::open(&runtime_config)?;
+        let persistence: Arc<dyn PersistenceStore> = Arc::new(SqlitePersistenceBridge::new(sqlite));
 
-        Self {
+        let store = Self {
             runtime_config,
             started_at: Instant::now(),
             ready: AtomicBool::new(true),
@@ -61,8 +48,10 @@ impl DaemonStore {
             next_turn: AtomicU64::new(1),
             next_event: AtomicU64::new(1),
             next_stream: AtomicU64::new(1),
-            sessions: Mutex::new(sessions),
-        }
+            persistence,
+        };
+        store.ensure_default_session()?;
+        Ok(store)
     }
 
     pub fn uptime_secs(&self) -> u64 {
@@ -102,21 +91,12 @@ impl DaemonStore {
         format!("str_{id}")
     }
 
-    pub fn list_sessions(&self) -> Vec<SessionState> {
-        self.sessions
-            .lock()
-            .expect("sessions lock poisoned")
-            .values()
-            .cloned()
-            .collect()
+    pub fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
+        self.persistence.list_sessions()
     }
 
-    pub fn get_session(&self, session_id: &str) -> Option<SessionState> {
-        self.sessions
-            .lock()
-            .expect("sessions lock poisoned")
-            .get(session_id)
-            .cloned()
+    pub fn get_session(&self, session_id: &str) -> Result<Option<SessionRecord>> {
+        self.persistence.get_session(session_id)
     }
 
     pub fn append_message(
@@ -124,29 +104,9 @@ impl DaemonStore {
         session_id: &str,
         turn_id: &str,
         message: SessionMessage,
-    ) -> Option<Session> {
-        let mut sessions = self.sessions.lock().expect("sessions lock poisoned");
-        let state = sessions.get_mut(session_id)?;
-        state.messages.push(message);
-        state.session.last_turn_id = Some(turn_id.to_string());
-        state.session.status = SessionStatus::Active;
-        state.session.meta.updated_at = Utc::now();
-
-        if state.session.title.is_none() {
-            let mut title = state
-                .messages
-                .first()
-                .map(|item| item.content.clone())
-                .unwrap_or_else(|| "Session".into())
-                .trim()
-                .replace('\n', " ");
-            if title.len() > 48 {
-                title.truncate(48);
-            }
-            state.session.title = Some(title);
-        }
-
-        Some(state.session.clone())
+    ) -> Result<Session> {
+        self.persistence
+            .append_message(session_id, turn_id, message)
     }
 
     pub fn record_event(
@@ -156,10 +116,8 @@ impl DaemonStore {
         event_id: &str,
         event_type: EventType,
         payload: Value,
-    ) -> Option<RuntimeEvent> {
-        let mut sessions = self.sessions.lock().expect("sessions lock poisoned");
-        let state = sessions.get_mut(session_id)?;
-        let event = RuntimeEvent {
+    ) -> Result<RuntimeEvent> {
+        self.persistence.append_event(RuntimeEvent {
             event_id: event_id.into(),
             event_type,
             occurred_at: Utc::now(),
@@ -182,9 +140,69 @@ impl DaemonStore {
             idempotency_key: None,
             payload,
             schema_version: self.runtime_config.event_schema_version.clone(),
-        };
-        state.events.push(event.clone());
-        Some(event)
+        })
+    }
+
+    fn ensure_default_session(&self) -> Result<()> {
+        let session_id = "session.default";
+        if self.persistence.get_session(session_id)?.is_none() {
+            self.persistence
+                .upsert_session(default_session(&self.runtime_config))?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct SqlitePersistenceBridge {
+    session_store: crate::plugins::storage::sqlite_sessions::SqliteSessionStore,
+    event_store: crate::plugins::storage::sqlite_context::SqliteEventStore,
+}
+
+impl SqlitePersistenceBridge {
+    fn new(sqlite: SqlitePersistence) -> Self {
+        Self {
+            session_store: sqlite.session_store(),
+            event_store: sqlite.event_store(),
+        }
+    }
+}
+
+impl SessionStore for SqlitePersistenceBridge {
+    fn upsert_session(&self, session: Session) -> Result<Session> {
+        self.session_store.upsert_session(session)
+    }
+
+    fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
+        self.session_store.list_sessions()
+    }
+
+    fn get_session(&self, session_id: &str) -> Result<Option<SessionRecord>> {
+        self.session_store.get_session(session_id)
+    }
+
+    fn append_message(
+        &self,
+        session_id: &str,
+        turn_id: &str,
+        message: SessionMessage,
+    ) -> Result<Session> {
+        self.session_store
+            .append_message(session_id, turn_id, message)
+    }
+}
+
+impl EventStore for SqlitePersistenceBridge {
+    fn append_event(&self, event: RuntimeEvent) -> Result<RuntimeEvent> {
+        self.event_store.append_event(event)
+    }
+
+    fn list_events_by_session(&self, session_id: &str) -> Result<Vec<RuntimeEvent>> {
+        self.event_store.list_events_by_session(session_id)
+    }
+
+    fn list_events_by_turn(&self, turn_id: &str) -> Result<Vec<RuntimeEvent>> {
+        self.event_store.list_events_by_turn(turn_id)
     }
 }
 

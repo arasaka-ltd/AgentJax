@@ -46,12 +46,12 @@ impl Dispatch {
 }
 
 impl Daemon {
-    pub fn new(app: Application) -> Self {
+    pub fn new(app: Application) -> anyhow::Result<Self> {
         let runtime_config = app.runtime_config.clone();
-        Self {
+        Ok(Self {
             app: Arc::new(app),
-            store: Arc::new(DaemonStore::new(runtime_config)),
-        }
+            store: Arc::new(DaemonStore::new(runtime_config)?),
+        })
     }
 
     pub fn connection_id(&self) -> ConnectionId {
@@ -105,6 +105,7 @@ impl Daemon {
                 let items = self
                     .store
                     .list_sessions()
+                    .map_err(internal_store_error)?
                     .into_iter()
                     .map(|state| SessionListItem {
                         session_id: state.session.session_id,
@@ -123,6 +124,7 @@ impl Daemon {
                 let state = self
                     .store
                     .get_session(&params.session_id)
+                    .map_err(internal_store_error)?
                     .ok_or_else(session_not_found)?;
                 Ok((
                     self.serialize(SessionGetResponse {
@@ -150,6 +152,7 @@ impl Daemon {
         let session = self
             .store
             .get_session(&params.session_id)
+            .map_err(internal_store_error)?
             .ok_or_else(session_not_found)?;
         let user_message = finalize_message(
             params.message,
@@ -160,7 +163,7 @@ impl Daemon {
 
         self.store
             .append_message(&params.session_id, &turn_id, user_message.clone())
-            .ok_or_else(session_not_found)?;
+            .map_err(map_store_error)?;
         self.record_event(
             &params.session_id,
             &turn_id,
@@ -210,6 +213,7 @@ impl Daemon {
             &self
                 .store
                 .get_session(&params.session_id)
+                .map_err(internal_store_error)?
                 .ok_or_else(session_not_found)?
                 .messages,
             8,
@@ -308,7 +312,7 @@ impl Daemon {
         assistant_message.meta.actor_id = Some(self.app.runtime.default_agent().agent_id.clone());
         self.store
             .append_message(&params.session_id, &turn_id, assistant_message.clone())
-            .ok_or_else(session_not_found)?;
+            .map_err(map_store_error)?;
         self.record_event(
             &params.session_id,
             &turn_id,
@@ -362,7 +366,7 @@ impl Daemon {
                 event_type,
                 payload,
             )
-            .ok_or_else(session_not_found)?;
+            .map_err(map_store_error)?;
         self.app
             .context_engine
             .append_event(event)
@@ -467,6 +471,22 @@ impl StreamEnvelopeExt for ServerEnvelope {
 
 fn session_not_found() -> ApiError {
     ApiError::new(ApiErrorCode::SessionNotFound, "session not found", false)
+}
+
+fn internal_store_error(error: anyhow::Error) -> ApiError {
+    ApiError::new(
+        ApiErrorCode::InternalError,
+        format!("store operation failed: {error}"),
+        false,
+    )
+}
+
+fn map_store_error(error: anyhow::Error) -> ApiError {
+    if error.to_string().contains("session not found") {
+        session_not_found()
+    } else {
+        internal_store_error(error)
+    }
 }
 
 fn build_context_prompt(
@@ -741,7 +761,7 @@ mod tests {
             runtime_config,
             identity,
         );
-        let daemon = Daemon::new(app);
+        let daemon = Daemon::new(app).unwrap();
 
         let send = daemon
             .handle_request(RequestEnvelope {
@@ -787,6 +807,112 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn session_persistence_survives_daemon_restart() {
+        let root = temp_path("sqlite-persistence");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&workspace_root).unwrap();
+
+        let server = spawn_server(vec![(
+            "POST /v1/responses HTTP/1.1".to_string(),
+            vec![
+                "<agentjax_prompt version=\\\"v1\\\">".to_string(),
+                "<message kind=\\\"user\\\">".to_string(),
+                "<content>persist this session</content>".to_string(),
+            ],
+            r#"{"id":"resp_persist","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{"id":"msg_persist","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"persistent assistant reply","annotations":[]}]}],"tools":[]}"#.to_string(),
+        )])
+        .await;
+
+        let runtime_config =
+            test_runtime_config(&root, &workspace_root, Some(format!("http://{}", server.0)));
+        let identity = test_identity(&workspace_root);
+
+        let daemon = Daemon::new(Application::new(
+            ConfigRoot::new(root.join("config")),
+            runtime_config.clone(),
+            identity.clone(),
+        ))
+        .unwrap();
+
+        let send = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_persist_send".into()),
+                method: ApiMethod::SessionSend,
+                params: serde_json::json!({
+                    "session_id": "session.default",
+                    "message": { "role": "user", "content": "persist this session" },
+                    "stream": false,
+                }),
+                meta: None,
+            })
+            .await;
+        assert!(matches!(
+            send.response,
+            crate::api::ServerEnvelope::Response(_)
+        ));
+
+        drop(daemon);
+        server.1.abort();
+
+        let restarted = Daemon::new(Application::new(
+            ConfigRoot::new(root.join("config")),
+            runtime_config,
+            identity,
+        ))
+        .unwrap();
+
+        let list = restarted
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_persist_list".into()),
+                method: ApiMethod::SessionList,
+                params: serde_json::json!({}),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(list_response) = list.response else {
+            panic!("expected response envelope");
+        };
+        let listed: crate::api::SessionListResponse =
+            serde_json::from_value(list_response.result.unwrap()).unwrap();
+        assert!(listed
+            .items
+            .iter()
+            .any(|item| item.session_id == "session.default"));
+
+        let get = restarted
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_persist_get".into()),
+                method: ApiMethod::SessionGet,
+                params: serde_json::json!({ "session_id": "session.default" }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(get_response) = get.response else {
+            panic!("expected response envelope");
+        };
+        let session: crate::api::SessionGetResponse =
+            serde_json::from_value(get_response.result.unwrap()).unwrap();
+        assert!(session
+            .messages
+            .iter()
+            .any(|message| message.content == "persist this session"));
+        assert!(session
+            .messages
+            .iter()
+            .any(|message| message.content == "persistent assistant reply"));
+        assert!(session
+            .events
+            .iter()
+            .any(|event| event.event_type == crate::domain::EventType::MessageReceived));
+        assert!(session
+            .events
+            .iter()
+            .any(|event| event.event_type == crate::domain::EventType::TurnSucceeded));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn doc(path: PathBuf, content: &str) -> WorkspaceDocument {
         WorkspaceDocument {
             path,
@@ -800,6 +926,46 @@ mod tests {
             .expect("system time")
             .as_nanos();
         std::env::temp_dir().join(format!("agentjax-{prefix}-{nanos}"))
+    }
+
+    fn test_runtime_config(
+        root: &std::path::Path,
+        workspace_root: &std::path::Path,
+        base_url: Option<String>,
+    ) -> RuntimeConfig {
+        let mut runtime_config = RuntimeConfig::new(
+            "agentjax-test",
+            crate::config::RuntimePaths::new(root.join("runtime")),
+            crate::config::WorkspaceConfig::new(
+                "default-workspace",
+                WorkspacePaths::new(workspace_root),
+            ),
+        );
+        runtime_config.agent_runtime.llm.providers =
+            vec![crate::config::LlmProviderConfig::OpenAi(
+                OpenAiProviderConfig {
+                    provider_id: "openai-default".into(),
+                    api_key: Some("test-key".into()),
+                    api_key_env: "OPENAI_API_KEY".into(),
+                    base_url,
+                    organization: None,
+                    project: None,
+                },
+            )];
+        runtime_config
+    }
+
+    fn test_identity(workspace_root: &std::path::Path) -> WorkspaceIdentityPack {
+        WorkspaceIdentityPack {
+            workspace_id: "default-workspace".into(),
+            agent: doc(workspace_root.join("AGENT.md"), ""),
+            soul: doc(workspace_root.join("SOUL.md"), ""),
+            user: doc(workspace_root.join("USER.md"), ""),
+            memory: doc(workspace_root.join("MEMORY.md"), ""),
+            mission: doc(workspace_root.join("MISSION.md"), ""),
+            rules: doc(workspace_root.join("RULES.md"), ""),
+            router: doc(workspace_root.join("ROUTER.md"), ""),
+        }
     }
 
     async fn spawn_server(
