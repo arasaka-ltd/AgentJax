@@ -14,8 +14,8 @@
 这份文档的作用是：
 1. 汇总当前所有正式规范
 2. 给出推荐代码结构
-3. 定义下一轮 Code 模式的起步顺序
-4. 提供一条新的、明确的实现入口
+3. 定义执行顺序与任务入口
+4. 提供下一轮对话的固定工作方式
 ---
 ## 2. 当前正式规范文档
 AgentJax 当前的正式架构规范由以下文档组成。
@@ -122,6 +122,32 @@ AgentJax 当前的正式架构规范由以下文档组成。
   - scheduled task model
   - trigger / execution mode / target / bindings
   - capability node registry / selector
+### Spec 10：Config Manager
+- `docs/CONFIG_MANAGER_SPEC.md`
+- 作用：定义配置管理器的职责、初始化、加载、校验、迁移、快照与热重载契约
+- 包括：
+  - config initializer
+  - config loader / validator / normalizer
+  - config migrator
+  - runtime config snapshot
+  - config diff / reload plan
+  - secret ref policy
+---
+## 2.5 执行入口文件
+从这一轮开始，除了正式 spec 外，还必须配合两份执行文档：
+- `/TASK.md`：当前可勾选任务清单
+- `docs/IMPLEMENTATION_ROADMAP.md`：分批次实施路线图
+
+执行顺序固定为：
+1. 先读本文件
+2. 再读相关 spec
+3. 再读 `docs/IMPLEMENTATION_ROADMAP.md`
+4. 最后按 `/TASK.md` 从上到下推进
+
+工作规则：
+- 每完成一项，就直接在 `TASK.md` 里勾掉
+- 不跳批次，不重排优先级，除非出现硬 blocker
+- 每完成一个小批次，都运行 `cargo fmt` 和 `cargo check`
 ---
 ## 3. 当前项目的总体方向
 一句话概括：
@@ -289,115 +315,51 @@ src/
 - tracing
 - 时间与系统工具
 ---
-## 6. 下一轮 Code 模式的实现原则
-下一轮开始时，**不要优先接功能，不要优先接 Telegram，不要优先接 tool calling 细节**。
-优先级应该是：
-### 原则 1
-先把 spec 变成 Rust 类型与模块边界。
-### 原则 2
-先让 `domain/`、`core/`、`config/`、`context_engine/` 成形。
-### 原则 3
-插件实现先只保留“空骨架 + 最小适配”，不要急着做深功能。
-### 原则 4
-目标是“架构转向成功且 `cargo check` 通过”，不是一轮做完全部 runtime。
+## 6. 当前阶段的执行原则
+当前阶段不再以“再补一批骨架”为目标，而以“按顺序分批做完真实能力”为目标。
+
+必须遵守：
+- 不优先接 Telegram
+- 不优先接 WebUI 花活
+- 不优先接高级 RAG
+- 不把任务重新打散成新的临时优先级
+
+当前主线固定为：
+1. workspace persona loading
+2. context assembly v0
+3. tool calling v0
+4. session / event persistence
+5. memory / RAG v0
+6. daemon API completion
+7. task runtime v0
+
+详细批次顺序见：
+- `docs/IMPLEMENTATION_ROADMAP.md`
+
+逐项执行清单见：
+- `/TASK.md`
 ---
-## 7. 第一轮 Code 模式的明确目标
-建议新对话开启后，第一轮只做 **架构骨架重构**。
-### P0：先做目录与类型系统
-1. 创建新的目录结构：
-   - `src/config/`
-   - `src/core/`
-   - `src/domain/`
-   - `src/context_engine/`
-   - `src/plugins/`
-2. 将 Spec 1 中最关键对象落成 Rust 类型：
-   - `ObjectMeta`
-   - `Agent`
-   - `Session`
-   - `Turn`
-   - `Task`
-   - `RuntimeEvent`
-   - `ContextBlock`
-   - `ToolCall`
-   - `Artifact`
-   - `SummaryNode`
-   - `RuntimeError`
-3. 将 Spec 2 中最关键路径模型落成 Rust 类型：
-   - `WorkspacePaths`
-   - `RuntimePaths`
-   - `ConfigRoot`
-4. 将 Spec 3 中最关键插件骨架落成 Rust 类型：
-   - `PluginManifest`
-   - `PluginRegistry`
-   - `PluginContext`（最小版）
-   - `ResourceDescriptor` / `ResourceId`
-5. 将 Spec 4 / 5 中最关键 runtime 契约落成 Rust 类型：
-   - `TurnPhase`
-   - `TaskPhase`
-   - `ContextAssemblyPurpose`
-   - `ResumePack`
-   - `RetryPolicy`
-   - `AutonomyPolicy`
-### P1：再做最小骨架实现
-6. `Application` 重构为 plugin host + workspace runtime host
-7. 创建最小 `ContextEngine` trait
-8. 创建最小 `WorkspaceRuntime` trait / struct
-9. 创建最小 `EventBus` / `PluginRegistry` 空实现
-10. 保持项目通过 `cargo check`
-### P2：最后做兼容迁移壳
-11. 旧代码先不深度实现，只做适配壳：
-   - sqlite session
-   - rig backend
-   - telegram adapter
-   - tools
-12. 这些实现先放入 `plugins/`，即使是 stub 也行
+## 7. 下一轮对话的固定工作方式
+新一轮对话开始后，默认工作流程固定为：
+1. 读取 `docs/ARCHITECTURE_ENTRYPOINT.md`
+2. 读取相关 spec
+3. 读取 `docs/IMPLEMENTATION_ROADMAP.md`
+4. 读取 `/TASK.md`
+5. 从第一个未完成任务开始做
+6. 完成后直接勾掉
+7. 继续下一个未完成任务
+
+除非出现 blocker，否则不要：
+- 自己改批次顺序
+- 自己新增平行主线
+- 跳过尚未完成的上游任务
 ---
-## 8. 当前阶段不建议立即做的事情
-为了避免又回到“边写边堆功能”的老路，以下内容本轮不建议优先做：
-- Telegram 全链路打通
-- 完整 tool calling loop
-- ST/TTS 真接入
-- 完整 scheduler
-- usage/billing 真结算
-- 全量 LCM compaction worker
-- 自动 skill routing
-- 动态插件加载
-- 复杂热重载
-- 分布式 node routing
-这些都应在骨架稳定后再接。
+## 8. 下一轮启动提示词
+下一轮全新对话可直接使用：
+
+> 请把 `docs/ARCHITECTURE_ENTRYPOINT.md` 作为总入口，把 `docs/IMPLEMENTATION_ROADMAP.md` 作为开发顺序，把 `/TASK.md` 作为执行清单。先读取相关规范，再从 `TASK.md` 中第一个未完成项开始实现。每完成一项就直接勾掉一项，不要跳批次，不要重新发明优先级；每完成一个可验证小批次，都运行 `cargo fmt` 和 `cargo check`。如果发现 docs 与代码冲突，以 docs 为准，并做最小必要修正。
 ---
-## 9. 新对话的启动提示词
-你下一轮全新对话，可以直接使用下面这段作为启动提示词。
-### 推荐启动提示词
-> 请以 `docs/ARCHITECTURE_ENTRYPOINT.md` 作为唯一开发入口，按其中的推荐代码结构对当前 Rust 项目做第一轮架构重构。目标不是继续实现功能，而是把现有规范落成 Rust 类型系统与模块骨架。优先完成 `src/config/`、`src/core/`、`src/domain/`、`src/context_engine/`、`src/plugins/` 的目录重组；落地 Core Object Model、Workspace/Runtime 路径模型、PluginManifest/PluginRegistry 最小骨架、RuntimeEvent/TurnPhase/TaskPhase/ContextAssemblyPurpose/ResumePack 等关键类型；将 `Application` 重构为 plugin host + workspace runtime host；保留旧实现为最小兼容壳，最终目标是保持项目 `cargo check` 通过。
-### 更强约束版启动提示词
-> 请严格按 `docs/ARCHITECTURE_ENTRYPOINT.md`、`docs/CORE_OBJECT_MODEL.md`、`docs/WORKSPACE_AND_CONFIG_SPEC.md`、`docs/PLUGIN_SDK.md`、`docs/RAG_KNOWLEDGE_MEMORY_SPEC.md`、`docs/CHANNELS_DAEMON_CLIENT_SPEC.md`、`docs/DAEMON_API_IPC_SCHEMA.md`、`docs/EVENT_TASK_LCM_RUNTIME.md`、`docs/LCM_CONTEXT_ENGINE.md` 的契约，重构当前 Rust 项目。第一轮不要扩功能，不要优先 Telegram/tool calling，而是先完成 domain/core/config/context_engine 的类型与骨架，保持 cargo check 通过，并为后续 plugin/runtime/context engine / rag subsystem / daemon api 落地建立稳定边界。
----
-## 10. 建议的实现顺序总览
-如果把后续工作拆成几轮，我建议：
-### Round 1
-- 类型系统
-- 目录结构
-- plugin/runtime/context engine 骨架
-### Round 2
-- config/workspace loader
-- event bus / registry 初版
-- sqlite schema 初版
-### Round 3
-- context engine storage + assemble_context 空实现
-- basic projection / summaries / checkpoints 模型
-### Round 4
-- 旧代码插件化迁移
-- sqlite session / rig backend / tools / telegram stub 适配
-### Round 5
-- 才开始接真正功能流
-- tool loop
-- context assembly
-- event logging
-- minimal end-to-end runtime
----
-## 11. 最终结论
-AgentJax 当前已经不缺想法，也不缺功能方向。
+## 9. 最终结论
+AgentJax 当前已经不缺规范，不缺方向，也不缺分层定义。
 当前最重要的是：
-**停止继续追加功能脑暴，开始把所有正式规范收束成一套可编译、可演化的 Rust 架构骨架。**
-这份文档就是那个新入口。
+**停止继续发散，按 `/TASK.md` 和 `docs/IMPLEMENTATION_ROADMAP.md` 分批做完。**

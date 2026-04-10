@@ -3,8 +3,8 @@ use std::sync::Arc;
 use crate::config::{ConfigRoot, RuntimeConfig};
 use crate::context_engine::{ContextEngine, NoopContextEngine};
 use crate::core::{
-    ApplicationRuntime, EventBus, PluginRegistry, ResourceProviderPlugin, ResourceRegistry,
-    WorkspaceRuntime,
+    ApplicationRuntime, EventBus, HookBus, PluginHost, PluginRegistry, ResourceProviderPlugin,
+    ResourceRegistry, RuntimeHost, WorkspaceRuntime, WorkspaceRuntimeHost,
 };
 use crate::plugins::providers::openai::OpenAiProviderPlugin;
 
@@ -12,41 +12,61 @@ use crate::plugins::providers::openai::OpenAiProviderPlugin;
 pub struct Application {
     pub config_root: ConfigRoot,
     pub runtime_config: RuntimeConfig,
+    pub plugin_host: PluginHost,
+    pub workspace_host: WorkspaceRuntimeHost,
+    pub runtime_host: RuntimeHost,
+    pub event_bus: EventBus,
+    pub context_engine: Arc<dyn ContextEngine>,
     pub runtime: Arc<ApplicationRuntime>,
     pub workspace_runtime: WorkspaceRuntime,
     pub plugin_registry: PluginRegistry,
     pub resource_registry: ResourceRegistry,
-    pub event_bus: EventBus,
-    pub context_engine: Arc<dyn ContextEngine>,
 }
 impl Application {
     pub fn new(config_root: ConfigRoot, runtime_config: RuntimeConfig) -> Self {
-        let workspace_runtime = WorkspaceRuntime::new(runtime_config.workspace.clone());
-        let runtime = Arc::new(ApplicationRuntime::new(runtime_config.clone()));
+        let workspace_host = WorkspaceRuntimeHost::new(runtime_config.workspace.clone());
+        let workspace_runtime = workspace_host.workspace_runtime.clone();
         let mut plugin_registry = PluginRegistry::default();
         let mut resource_registry = ResourceRegistry::default();
+        let event_bus = EventBus::default();
+        let hook_bus = HookBus::default();
 
         for provider in &runtime_config.agent_runtime.llm.providers {
             match provider {
                 crate::config::LlmProviderConfig::OpenAi(config) => {
-                    let plugin = OpenAiProviderPlugin::new(config.clone());
-                    for resource in plugin.provided_resources() {
-                        resource_registry.register(resource);
-                    }
-                    plugin_registry.register(std::sync::Arc::new(plugin));
+                    let plugin = Arc::new(OpenAiProviderPlugin::new(config.clone()));
+                    resource_registry.extend(plugin.provided_resources());
+                    plugin_registry.register(plugin.clone());
+                    plugin_registry.register_provider(plugin);
                 }
             }
         }
 
+        let plugin_host = PluginHost::new(
+            plugin_registry.clone(),
+            resource_registry.clone(),
+            event_bus.clone(),
+            hook_bus,
+        );
+        let runtime = Arc::new(ApplicationRuntime::new(
+            runtime_config.clone(),
+            plugin_host.clone(),
+            workspace_host.clone(),
+        ));
+        let runtime_host = RuntimeHost::new((*runtime).clone());
+
         Self {
             config_root,
             runtime_config,
+            plugin_host,
+            workspace_host,
+            runtime_host,
+            event_bus,
+            context_engine: Arc::new(NoopContextEngine::default()),
             runtime,
             workspace_runtime,
             plugin_registry,
             resource_registry,
-            event_bus: EventBus::default(),
-            context_engine: Arc::new(NoopContextEngine::default()),
         }
     }
 }

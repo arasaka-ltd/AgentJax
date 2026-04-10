@@ -83,7 +83,13 @@ impl TuiApp {
 
                 match key.code {
                     KeyCode::Esc => break,
-                    KeyCode::Char('c') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => break,
+                    KeyCode::Char('c')
+                        if key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                    {
+                        break
+                    }
                     KeyCode::Enter => {
                         let message = self.input.trim().to_string();
                         if message.is_empty() {
@@ -91,9 +97,13 @@ impl TuiApp {
                         }
 
                         self.status = String::from("Sending...");
-                        let send_result: Result<SessionSendResponse> =
-                            session_send(self.unix_socket.clone(), self.session_id.clone(), message, false)
-                                .await;
+                        let send_result: Result<SessionSendResponse> = session_send(
+                            self.unix_socket.clone(),
+                            self.session_id.clone(),
+                            message,
+                            false,
+                        )
+                        .await;
                         match send_result {
                             Ok(_) => {
                                 self.session = request(

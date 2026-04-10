@@ -9,7 +9,7 @@ use rig::{
 
 use crate::{
     config::{AgentDefinition, OpenAiProviderConfig},
-    core::{BillingPlugin, Plugin, PluginContext, ResourceProviderPlugin},
+    core::{BillingPlugin, Plugin, PluginContext, ProviderPlugin, ResourceProviderPlugin},
     domain::{
         BillingBreakdownItem, BillingCapability, BillingConfidence, BillingMode, BillingRecord,
         Permission, PluginCapability, PluginManifest, ProviderCapability, Resource,
@@ -181,6 +181,19 @@ impl Plugin for OpenAiProviderPlugin {
 impl ResourceProviderPlugin for OpenAiProviderPlugin {
     fn provided_resources(&self) -> Vec<Resource> {
         OpenAiProviderAdapter::new(self.config.clone()).resources()
+    }
+}
+
+#[async_trait]
+impl ProviderPlugin for OpenAiProviderPlugin {
+    fn provider_id(&self) -> &str {
+        &self.config.provider_id
+    }
+
+    async fn prompt_text(&self, agent: &AgentDefinition, prompt: &str) -> Result<String> {
+        OpenAiProviderAdapter::new(self.config.clone())
+            .prompt_text(agent, prompt)
+            .await
     }
 }
 

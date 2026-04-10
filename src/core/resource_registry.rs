@@ -13,6 +13,15 @@ impl ResourceRegistry {
             .insert(resource.resource_id.clone(), resource);
     }
 
+    pub fn extend<I>(&mut self, resources: I)
+    where
+        I: IntoIterator<Item = Resource>,
+    {
+        for resource in resources {
+            self.register(resource);
+        }
+    }
+
     pub fn get(&self, id: &ResourceId) -> Option<&Resource> {
         self.resources.get(id)
     }

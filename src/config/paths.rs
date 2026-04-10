@@ -9,6 +9,8 @@ pub struct ConfigRoot {
     pub models_config: PathBuf,
     pub resources_config: PathBuf,
     pub channels_config: PathBuf,
+    pub surfaces_config: PathBuf,
+    pub daemon_config: PathBuf,
     pub nodes_config: PathBuf,
     pub scheduler_config: PathBuf,
     pub skills_config: PathBuf,
@@ -23,6 +25,8 @@ impl ConfigRoot {
             models_config: root.join("models.toml"),
             resources_config: root.join("resources.toml"),
             channels_config: root.join("channels.toml"),
+            surfaces_config: root.join("surfaces.toml"),
+            daemon_config: root.join("daemon.toml"),
             nodes_config: root.join("nodes.toml"),
             scheduler_config: root.join("scheduler.toml"),
             skills_config: root.join("skills.toml"),
@@ -76,6 +80,8 @@ impl WorkspacePaths {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimePaths {
     pub root: PathBuf,
+    pub run_root: PathBuf,
+    pub daemon_socket: PathBuf,
     pub state_root: PathBuf,
     pub sessions_dir: PathBuf,
     pub tasks_dir: PathBuf,
@@ -91,8 +97,10 @@ pub struct RuntimePaths {
 impl RuntimePaths {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
+        let run_root = root.join("run");
         let state_root = root.join("state");
         Self {
+            daemon_socket: run_root.join("daemon.sock"),
             sessions_dir: state_root.join("sessions"),
             tasks_dir: state_root.join("tasks"),
             lcm_dir: state_root.join("lcm"),
@@ -103,6 +111,7 @@ impl RuntimePaths {
             logs_root: root.join("logs"),
             cache_root: root.join("cache"),
             tmp_root: root.join("tmp"),
+            run_root,
             state_root,
             root,
         }

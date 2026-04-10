@@ -20,7 +20,9 @@ pub mod usage;
 pub use agent::{Agent, AgentStatus};
 pub use artifact::{Artifact, ArtifactProducer, RetentionPolicy};
 pub use billing::{BillingBreakdownItem, BillingConfidence, BillingMode, BillingRecord};
-pub use context::{Confidence, ContextBlock, ContextBlockKind, ContextSource, Freshness};
+pub use context::{
+    Confidence, ContextBlock, ContextBlockKind, ContextProjection, ContextSource, Freshness,
+};
 pub use event::{EventRecord, EventSource, EventType, RuntimeEvent};
 pub use node::{Node, NodeKind, NodeStatus, TrustLevel};
 pub use object_meta::ObjectMeta;

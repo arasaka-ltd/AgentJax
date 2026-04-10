@@ -1,11 +1,13 @@
 use anyhow::{anyhow, Result};
 
-use crate::config::{AgentDefinition, LlmProviderConfig, RuntimeConfig};
-use crate::plugins::providers::openai::OpenAiProviderAdapter;
+use crate::config::{AgentDefinition, RuntimeConfig};
+use crate::core::{PluginHost, WorkspaceRuntimeHost};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ApplicationRuntime {
     config: RuntimeConfig,
+    plugin_host: PluginHost,
+    workspace_host: WorkspaceRuntimeHost,
 }
 
 #[derive(Debug, Clone)]
@@ -15,8 +17,16 @@ pub struct AgentPromptRequest {
 }
 
 impl ApplicationRuntime {
-    pub fn new(config: RuntimeConfig) -> Self {
-        Self { config }
+    pub fn new(
+        config: RuntimeConfig,
+        plugin_host: PluginHost,
+        workspace_host: WorkspaceRuntimeHost,
+    ) -> Self {
+        Self {
+            config,
+            plugin_host,
+            workspace_host,
+        }
     }
 
     pub fn default_agent(&self) -> &AgentDefinition {
@@ -27,16 +37,19 @@ impl ApplicationRuntime {
         &self.config
     }
 
+    pub fn plugin_host(&self) -> &PluginHost {
+        &self.plugin_host
+    }
+
+    pub fn workspace_host(&self) -> &WorkspaceRuntimeHost {
+        &self.workspace_host
+    }
+
     pub async fn prompt_text(&self, request: AgentPromptRequest) -> Result<String> {
         let agent = self.resolve_agent(request.agent_id.as_deref())?;
-
-        match self.resolve_provider(&agent.provider_id)? {
-            LlmProviderConfig::OpenAi(provider) => {
-                OpenAiProviderAdapter::new(provider.clone())
-                    .prompt_text(agent, &request.prompt)
-                    .await
-            }
-        }
+        self.resolve_provider(&agent.provider_id)?
+            .prompt_text(agent, &request.prompt)
+            .await
     }
 
     fn resolve_agent(&self, agent_id: Option<&str>) -> Result<&AgentDefinition> {
@@ -49,13 +62,28 @@ impl ApplicationRuntime {
         }
     }
 
-    fn resolve_provider(&self, provider_id: &str) -> Result<&LlmProviderConfig> {
-        self.config
-            .agent_runtime
-            .llm
-            .providers
-            .iter()
-            .find(|provider| provider.provider_id() == provider_id)
+    fn resolve_provider(
+        &self,
+        provider_id: &str,
+    ) -> Result<crate::core::plugin::ProviderPluginRef> {
+        self.plugin_host
+            .registry()
+            .provider(provider_id)
             .ok_or_else(|| anyhow!("unknown provider id: {provider_id}"))
+    }
+}
+
+#[derive(Clone)]
+pub struct RuntimeHost {
+    runtime: ApplicationRuntime,
+}
+
+impl RuntimeHost {
+    pub fn new(runtime: ApplicationRuntime) -> Self {
+        Self { runtime }
+    }
+
+    pub fn runtime(&self) -> &ApplicationRuntime {
+        &self.runtime
     }
 }

@@ -37,6 +37,15 @@ pub enum ContextBlockKind {
     Checkpoint,
     RuntimeDirective,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextProjection {
+    pub projection_id: String,
+    pub session_id: Option<String>,
+    pub task_id: Option<String>,
+    pub purpose: crate::domain::ContextAssemblyPurpose,
+    pub blocks: Vec<ContextBlock>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContextBlock {
     pub block_id: String,

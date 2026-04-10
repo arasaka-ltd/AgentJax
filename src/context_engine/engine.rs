@@ -25,6 +25,9 @@ impl ContextEngine for NoopContextEngine {
         _task_id: Option<&str>,
     ) -> Result<ResumePack> {
         Ok(ResumePack {
+            workspace_id: None,
+            session_id: None,
+            task_id: None,
             mission_ref: None,
             active_task_ids: Vec::new(),
             latest_checkpoint_summary_id: None,
@@ -32,6 +35,9 @@ impl ContextEngine for NoopContextEngine {
             open_blockers: Vec::new(),
             pending_artifact_ids: Vec::new(),
             last_safe_action_boundary: None,
+            next_recommended_action: None,
+            assumptions: Vec::new(),
+            risks: Vec::new(),
         })
     }
 }

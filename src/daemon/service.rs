@@ -222,7 +222,8 @@ impl Daemon {
             }),
         )?;
 
-        let followups = if let Some(stream_id) = params.stream.then(|| self.store.next_stream_id()) {
+        let followups = if let Some(stream_id) = params.stream.then(|| self.store.next_stream_id())
+        {
             build_stream_envelopes(&stream_id, &turn_id, &assistant_message.content)
         } else {
             Vec::new()
@@ -230,7 +231,12 @@ impl Daemon {
         let stream_id = if followups.is_empty() {
             None
         } else {
-            Some(followups[0].stream_id().expect("stream envelope id exists").into())
+            Some(
+                followups[0]
+                    .stream_id()
+                    .expect("stream envelope id exists")
+                    .into(),
+            )
         };
 
         Ok((
