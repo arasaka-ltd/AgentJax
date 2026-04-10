@@ -684,7 +684,7 @@ mod tests {
 
         let server = spawn_server(vec![
             (
-                "POST /responses HTTP/1.1".to_string(),
+                "POST /v1/responses HTTP/1.1".to_string(),
                 vec![
                     "<agentjax_prompt version=\\\"v1\\\">".to_string(),
                     "<tools>".to_string(),
@@ -697,7 +697,7 @@ mod tests {
                 ),
             ),
             (
-                "POST /responses HTTP/1.1".to_string(),
+                "POST /v1/responses HTTP/1.1".to_string(),
                 vec![
                     "<message kind=\\\"tool_result\\\">".to_string(),
                     "Answer the user directly using the tool result.".to_string(),

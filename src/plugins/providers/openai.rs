@@ -3,13 +3,8 @@ use async_trait::async_trait;
 use reqwest::header::{
     HeaderMap as ReqwestHeaderMap, HeaderValue as ReqwestHeaderValue, AUTHORIZATION,
 };
-use rig::{
-    completion::Prompt,
-    http_client::{HeaderMap, HeaderValue},
-    prelude::CompletionClient,
-    providers::openai,
-};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 use crate::{
     config::{
@@ -44,6 +39,28 @@ pub struct OpenAiModelCatalog {
 #[derive(Debug, Deserialize)]
 struct OpenAiModelsResponse {
     data: Vec<OpenAiRawModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiResponsesApiResponse {
+    #[serde(default)]
+    output_text: Option<String>,
+    #[serde(default)]
+    output: Vec<OpenAiResponsesOutputItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiResponsesOutputItem {
+    #[serde(default)]
+    content: Vec<OpenAiResponsesContentItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiResponsesContentItem {
+    #[serde(rename = "type")]
+    content_type: String,
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -183,59 +200,103 @@ impl OpenAiProviderAdapter {
     }
 
     pub async fn prompt_text(&self, agent: &AgentDefinition, prompt: &str) -> Result<String> {
-        let client = self.build_client()?;
-        let mut builder = client.agent(&agent.model);
-
-        if let Some(preamble) = &agent.preamble {
-            builder = builder.preamble(preamble);
+        let client = reqwest::Client::builder().build()?;
+        let response = client
+            .post(self.config.endpoint_url("responses"))
+            .headers(self.request_headers()?)
+            .json(&self.responses_request_body(agent, prompt))
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow!("openai prompt failed: status {status} body {body}"));
         }
 
-        if let Some(temperature) = agent.temperature {
-            builder = builder.temperature(temperature);
-        }
-
-        if let Some(max_tokens) = agent.max_tokens {
-            builder = builder.max_tokens(max_tokens);
-        }
-
-        let rig_agent = builder.build();
-        rig_agent
-            .prompt(prompt)
-            .await
-            .map_err(|error| anyhow!("openai prompt failed: {error}"))
+        let payload: OpenAiResponsesApiResponse = response.json().await?;
+        extract_output_text(payload)
     }
 
-    fn build_client(&self) -> Result<openai::Client> {
+    fn request_headers(&self) -> Result<ReqwestHeaderMap> {
+        let mut headers = ReqwestHeaderMap::new();
         let api_key = self.config.resolve_api_key()?;
-        let mut builder = openai::Client::builder().api_key(api_key);
-
-        if let Some(base_url) = &self.config.base_url {
-            builder = builder.base_url(base_url);
-        }
-
-        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            ReqwestHeaderValue::from_str(&format!("Bearer {api_key}"))?,
+        );
         if let Some(organization) = &self.config.organization {
             headers.insert(
                 "OpenAI-Organization",
-                HeaderValue::from_str(organization)
-                    .map_err(|error| anyhow!("invalid OpenAI organization header: {error}"))?,
+                ReqwestHeaderValue::from_str(organization)?,
             );
         }
         if let Some(project) = &self.config.project {
-            headers.insert(
-                "OpenAI-Project",
-                HeaderValue::from_str(project)
-                    .map_err(|error| anyhow!("invalid OpenAI project header: {error}"))?,
-            );
+            headers.insert("OpenAI-Project", ReqwestHeaderValue::from_str(project)?);
         }
-        if !headers.is_empty() {
-            builder = builder.http_headers(headers);
-        }
-
-        builder
-            .build()
-            .map_err(|error| anyhow!("failed to build Rig OpenAI client: {error}"))
+        Ok(headers)
     }
+
+    fn responses_request_body(&self, agent: &AgentDefinition, prompt: &str) -> Value {
+        let mut body = json!({
+            "model": agent.model,
+            "input": prompt,
+        });
+        if let Some(preamble) = &agent.preamble {
+            body["instructions"] = Value::String(preamble.clone());
+        }
+        if let Some(temperature) = agent.temperature {
+            body["temperature"] = json!(temperature);
+        }
+        if let Some(max_tokens) = agent.max_tokens {
+            body["max_output_tokens"] = json!(max_tokens);
+        }
+        body
+    }
+}
+
+fn extract_output_text(payload: OpenAiResponsesApiResponse) -> Result<String> {
+    if let Some(output_text) = payload.output_text.filter(|text| !text.trim().is_empty()) {
+        return Ok(collapse_repeated_text(output_text));
+    }
+
+    let text = payload
+        .output
+        .into_iter()
+        .flat_map(|item| item.content.into_iter())
+        .filter(|item| item.content_type == "output_text")
+        .filter_map(|item| item.text)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if text.trim().is_empty() {
+        Err(anyhow!("openai prompt failed: empty response output"))
+    } else {
+        Ok(collapse_repeated_text(text))
+    }
+}
+
+fn collapse_repeated_text(text: String) -> String {
+    let trimmed = text.trim().to_string();
+    let len = trimmed.len();
+    if len < 2 {
+        return trimmed;
+    }
+
+    for unit_len in 1..=(len / 2) {
+        if len % unit_len != 0 {
+            continue;
+        }
+        let repeats = len / unit_len;
+        if repeats < 2 {
+            continue;
+        }
+        let unit = &trimmed[..unit_len];
+        if unit.repeat(repeats) == trimmed {
+            return unit.to_string();
+        }
+    }
+
+    trimmed
 }
 
 #[derive(Debug, Clone)]
@@ -435,7 +496,8 @@ mod tests {
     };
 
     use super::{
-        normalize_model_info, OpenAiProviderAdapter, OpenAiProviderConfig, OpenAiRawModel,
+        collapse_repeated_text, normalize_model_info, OpenAiProviderAdapter, OpenAiProviderConfig,
+        OpenAiRawModel,
     };
     use crate::config::AgentDefinition;
 
@@ -468,7 +530,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_text_uses_configured_base_url() {
         let server = spawn_server(vec![(
-            "POST /responses HTTP/1.1",
+            "POST /v1/responses HTTP/1.1",
             r#"{"id":"resp_1","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"mocked reply","annotations":[]}]}],"tools":[]}"#,
         )])
         .await;
@@ -510,6 +572,21 @@ mod tests {
         assert_eq!(models[0].model_id, "gpt-4o-mini");
         let normalized = normalize_model_info("o4-mini");
         assert!(normalized.capability_tags.contains(&"reasoning".into()));
+    }
+
+    #[test]
+    fn collapses_exact_repeated_output_text() {
+        assert_eq!(
+            collapse_repeated_text("provider-okprovider-okprovider-ok".into()),
+            "provider-ok"
+        );
+        assert_eq!(
+            collapse_repeated_text(
+                "TOOL_CALL {\"tool\":\"list_files\"}TOOL_CALL {\"tool\":\"list_files\"}".into()
+            ),
+            "TOOL_CALL {\"tool\":\"list_files\"}"
+        );
+        assert_eq!(collapse_repeated_text("unique text".into()), "unique text");
     }
 
     async fn spawn_server(
