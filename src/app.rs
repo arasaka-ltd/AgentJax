@@ -73,7 +73,10 @@ impl Application {
             runtime_host,
             tool_registry,
             event_bus,
-            context_engine: Arc::new(WorkspaceContextEngine::new(workspace_identity)),
+            context_engine: Arc::new(WorkspaceContextEngine::new(
+                workspace_identity,
+                workspace_runtime.workspace.paths.clone(),
+            )),
             runtime,
             workspace_runtime,
             plugin_registry,

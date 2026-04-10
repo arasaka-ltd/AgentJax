@@ -17,6 +17,7 @@ pub enum ContextSource {
     EventLog { event_id: String },
     Summary { summary_node_id: String },
     Memory { memory_ref: String },
+    Knowledge { knowledge_ref: String },
     ToolTrace { tool_call_id: String },
     Artifact { artifact_id: String },
     Runtime,

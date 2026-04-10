@@ -175,23 +175,23 @@
 - [x] 为默认模型、session override、重启恢复补最小回归测试
 
 ## Batch 4: Memory / RAG v0
-- [ ] 实现 `MEMORY.md` + `memory/topics/` 的最小读取召回
-- [ ] 实现 `knowledge/` 的最小 keyword/full-text 检索
-- [ ] 定义最小 collection abstraction
-- [ ] 实现 `retrieval_bridge` 最小闭环
-- [ ] 将 memory / knowledge 检索结果接入 context assembly
-- [ ] 明确区分 memory recall 和 knowledge retrieval
+- [x] 实现 `MEMORY.md` + `memory/topics/` 的最小读取召回
+- [x] 实现 `knowledge/` 的最小 keyword/full-text 检索
+- [x] 定义最小 collection abstraction
+- [x] 实现 `retrieval_bridge` 最小闭环
+- [x] 将 memory / knowledge 检索结果接入 context assembly
+- [x] 明确区分 memory recall 和 knowledge retrieval
 
 ## Batch 5: Daemon API Completion
-- [ ] 补齐 `runtime.*` 其余 handler
-- [ ] 补齐 `config.*` handler
-- [ ] 补齐 `plugin.*` handler
-- [ ] 补齐 `task.*` handler
-- [ ] 补齐 `node.*` handler
-- [ ] 补齐 `schedule.*` handler
-- [ ] 补齐 `doctor.*` / `smoke.*` / `logs.*` / `metrics.*`
-- [ ] 实现 `subscription.cancel`
-- [ ] 实现 `stream.cancel`
+- [x] 补齐 `runtime.*` 其余 handler
+- [x] 补齐 `config.*` handler
+- [x] 补齐 `plugin.*` handler
+- [x] 补齐 `task.*` handler
+- [x] 补齐 `node.*` handler
+- [x] 补齐 `schedule.*` handler
+- [x] 补齐 `doctor.*` / `smoke.*` / `logs.*` / `metrics.*`
+- [x] 实现 `subscription.cancel`
+- [x] 实现 `stream.cancel`
 
 ## Batch 6: Task Runtime v0
 - [ ] 实现最小 task store

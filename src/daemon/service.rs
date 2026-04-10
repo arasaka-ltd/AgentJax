@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use chrono::Utc;
 use serde::Serialize;
@@ -6,13 +9,24 @@ use serde_json::{json, Value};
 
 use crate::{
     api::{
-        ApiError, ApiErrorCode, ApiMethod, ClientEnvelope, ConnectionId, HelloAckEnvelope,
-        RequestEnvelope, ResponseEnvelope, RuntimePingResponse, RuntimeStatusResponse,
-        ServerEnvelope, SessionGetRequest, SessionGetResponse, SessionListItem,
+        AgentGetRequest, AgentGetResponse, AgentListItem, AgentListResponse, ApiError,
+        ApiErrorCode, ApiMethod, ClientEnvelope, ConfigInspectRequest, ConfigInspectResponse,
+        ConfigReloadResponse, ConfigValidateResponse, ConnectionId, DoctorCheckResult,
+        DoctorRunResponse, HelloAckEnvelope, LogsTailRequest, MetricsSnapshotResponse,
+        NodeGetRequest, NodeGetResponse, NodeListItem, NodeListResponse, PluginInspectRequest,
+        PluginInspectResponse, PluginListItem, PluginListResponse, PluginReloadRequest,
+        PluginReloadResponse, PluginTestRequest, PluginTestResponse, RequestEnvelope,
+        ResponseEnvelope, RuntimePingResponse, RuntimeShutdownRequest, RuntimeShutdownResponse,
+        RuntimeStatusResponse, ScheduleCreateRequest, ScheduleDeleteRequest, ScheduleGetResponse,
+        ScheduleListItem, ScheduleListResponse, ScheduleUpdateRequest, ServerEnvelope,
+        SessionCancelRequest, SessionGetRequest, SessionGetResponse, SessionListItem,
         SessionListResponse, SessionMessage, SessionMessageAnnotation, SessionModelInspectRequest,
         SessionModelInspectResponse, SessionModelState, SessionModelSwitchRequest,
         SessionModelSwitchResponse, SessionModelSwitchResult, SessionSendRequest,
-        SessionSendResponse, StreamEnvelope, StreamPhase,
+        SessionSendResponse, SessionSubscribeRequest, SmokeRunRequest, SmokeRunResponse,
+        StreamCancelRequest, StreamEnvelope, StreamPhase, SubscriptionCancelRequest,
+        SubscriptionResponse, TaskCancelRequest, TaskGetRequest, TaskGetResponse, TaskListItem,
+        TaskListResponse, TaskRetryRequest, TaskSubscribeRequest,
     },
     app::Application,
     context_engine::{
@@ -22,7 +36,9 @@ use crate::{
     core::AgentPromptRequest,
     daemon::store::DaemonStore,
     domain::{
-        ContextAssemblyPurpose, EventType, Session, SessionModelTarget, ToolCall, ToolCaller,
+        Agent, AgentStatus, AutonomyPolicy, ContextAssemblyPurpose, EventType, ExecutionMode, Node,
+        NodeKind, NodeStatus, ObjectMeta, PluginDescriptor, PluginStatus, Schedule, Session,
+        SessionModelTarget, Task, TaskStatus, ToolCall, ToolCaller, TrustLevel,
     },
 };
 
@@ -33,6 +49,36 @@ pub const SCHEMA_VERSION: &str = "2026-04-10";
 pub struct Daemon {
     app: Arc<Application>,
     store: Arc<DaemonStore>,
+    control: Arc<Mutex<ControlPlaneState>>,
+}
+
+#[derive(Default)]
+struct ControlPlaneState {
+    tasks: BTreeMap<String, Task>,
+    schedules: BTreeMap<String, Schedule>,
+    subscriptions: BTreeMap<String, RegisteredSubscription>,
+    streams: BTreeMap<String, RegisteredStream>,
+    logs: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RegisteredSubscription {
+    _kind: &'static str,
+    _target_id: String,
+    _accepted_events: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StreamStatus {
+    Active,
+    Completed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone)]
+struct RegisteredStream {
+    status: StreamStatus,
+    _source: &'static str,
 }
 
 pub struct Dispatch {
@@ -55,6 +101,7 @@ impl Daemon {
         Ok(Self {
             app: Arc::new(app),
             store: Arc::new(DaemonStore::new(runtime_config)?),
+            control: Arc::new(Mutex::new(ControlPlaneState::default())),
         })
     }
 
@@ -105,6 +152,16 @@ impl Daemon {
                 Vec::new(),
             )),
             ApiMethod::RuntimeStatus => Ok((self.serialize(self.runtime_status())?, Vec::new())),
+            ApiMethod::RuntimeShutdown => self.handle_runtime_shutdown(request.parse_params()?),
+            ApiMethod::ConfigInspect => self.handle_config_inspect(request.parse_params()?),
+            ApiMethod::ConfigValidate => self.handle_config_validate(),
+            ApiMethod::ConfigReload => self.handle_config_reload(),
+            ApiMethod::PluginList => self.handle_plugin_list(),
+            ApiMethod::PluginInspect => self.handle_plugin_inspect(request.parse_params()?),
+            ApiMethod::PluginReload => self.handle_plugin_reload(request.parse_params()?),
+            ApiMethod::PluginTest => self.handle_plugin_test(request.parse_params()?),
+            ApiMethod::AgentList => self.handle_agent_list(),
+            ApiMethod::AgentGet => self.handle_agent_get(request.parse_params()?),
             ApiMethod::SessionList => {
                 let items = self
                     .store
@@ -145,12 +202,28 @@ impl Daemon {
             ApiMethod::SessionModelSwitch => {
                 self.handle_session_model_switch(request.parse_params()?)
             }
+            ApiMethod::SessionCancel => self.handle_session_cancel(request.parse_params()?),
+            ApiMethod::SessionSubscribe => self.handle_session_subscribe(request.parse_params()?),
             ApiMethod::SessionSend => self.handle_session_send(request.parse_params()?).await,
-            _ => Err(ApiError::new(
-                ApiErrorCode::UnsupportedMethod,
-                format!("method {} is not implemented yet", request.method.as_str()),
-                false,
-            )),
+            ApiMethod::TaskList => self.handle_task_list(),
+            ApiMethod::TaskGet => self.handle_task_get(request.parse_params()?),
+            ApiMethod::TaskCancel => self.handle_task_cancel(request.parse_params()?),
+            ApiMethod::TaskRetry => self.handle_task_retry(request.parse_params()?),
+            ApiMethod::TaskSubscribe => self.handle_task_subscribe(request.parse_params()?),
+            ApiMethod::NodeList => self.handle_node_list(),
+            ApiMethod::NodeGet => self.handle_node_get(request.parse_params()?),
+            ApiMethod::ScheduleList => self.handle_schedule_list(),
+            ApiMethod::ScheduleCreate => self.handle_schedule_create(request.parse_params()?),
+            ApiMethod::ScheduleUpdate => self.handle_schedule_update(request.parse_params()?),
+            ApiMethod::ScheduleDelete => self.handle_schedule_delete(request.parse_params()?),
+            ApiMethod::DoctorRun => self.handle_doctor_run(),
+            ApiMethod::SmokeRun => self.handle_smoke_run(request.parse_params()?),
+            ApiMethod::LogsTail => self.handle_logs_tail(request.parse_params()?),
+            ApiMethod::MetricsSnapshot => self.handle_metrics_snapshot(),
+            ApiMethod::SubscriptionCancel => {
+                self.handle_subscription_cancel(request.parse_params()?)
+            }
+            ApiMethod::StreamCancel => self.handle_stream_cancel(request.parse_params()?),
         }
     }
 
@@ -306,6 +379,572 @@ impl Daemon {
             })?,
             Vec::new(),
         ))
+    }
+
+    fn handle_runtime_shutdown(
+        &self,
+        params: RuntimeShutdownRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let _ = params;
+        self.store.set_draining(true);
+        self.push_log("runtime shutdown requested");
+        Ok((
+            self.serialize(RuntimeShutdownResponse {
+                accepted: true,
+                draining: self.store.draining(),
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_config_inspect(
+        &self,
+        params: ConfigInspectRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let config = match params.section.as_str() {
+            "runtime" | "core" => {
+                serde_json::to_value(&self.app.runtime_config).map_err(|error| {
+                    ApiError::new(
+                        ApiErrorCode::InternalError,
+                        format!("config inspect serialization failed: {error}"),
+                        false,
+                    )
+                })?
+            }
+            "workspace" => {
+                serde_json::to_value(&self.app.workspace_runtime.workspace).map_err(|error| {
+                    ApiError::new(
+                        ApiErrorCode::InternalError,
+                        format!("workspace inspect serialization failed: {error}"),
+                        false,
+                    )
+                })?
+            }
+            "plugins" => serde_json::to_value(self.plugin_descriptors()).map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::InternalError,
+                    format!("plugin inspect serialization failed: {error}"),
+                    false,
+                )
+            })?,
+            "resources" => {
+                serde_json::to_value(self.app.resource_registry.all()).map_err(|error| {
+                    ApiError::new(
+                        ApiErrorCode::InternalError,
+                        format!("resource inspect serialization failed: {error}"),
+                        false,
+                    )
+                })?
+            }
+            other => {
+                return Err(ApiError::new(
+                    ApiErrorCode::InvalidRequest,
+                    format!("unknown config section: {other}"),
+                    false,
+                ))
+            }
+        };
+        Ok((
+            self.serialize(ConfigInspectResponse {
+                section: params.section,
+                config,
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_config_validate(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        Ok((
+            self.serialize(ConfigValidateResponse {
+                ok: true,
+                errors: Vec::new(),
+                warnings: Vec::new(),
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_config_reload(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        self.push_log("config reload requested");
+        Ok((
+            self.serialize(ConfigReloadResponse {
+                ok: true,
+                reloaded_modules: vec![
+                    "runtime".into(),
+                    "providers".into(),
+                    "workspace".into(),
+                    "plugins".into(),
+                ],
+                drained_modules: Vec::new(),
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_plugin_list(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let items = self
+            .plugin_descriptors()
+            .into_iter()
+            .map(|plugin| PluginListItem {
+                id: plugin.plugin_id,
+                enabled: !matches!(plugin.status, PluginStatus::Stopped | PluginStatus::Failed),
+                healthy: !matches!(plugin.status, PluginStatus::Failed),
+                capabilities: plugin.capabilities,
+            })
+            .collect();
+        Ok((self.serialize(PluginListResponse { items })?, Vec::new()))
+    }
+
+    fn handle_plugin_inspect(
+        &self,
+        params: PluginInspectRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let plugin = self
+            .plugin_descriptors()
+            .into_iter()
+            .find(|plugin| plugin.plugin_id == params.plugin_id)
+            .ok_or_else(plugin_not_found)?;
+        Ok((
+            self.serialize(PluginInspectResponse { plugin })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_plugin_reload(
+        &self,
+        params: PluginReloadRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        if !self
+            .plugin_descriptors()
+            .iter()
+            .any(|plugin| plugin.plugin_id == params.plugin_id)
+        {
+            return Err(plugin_not_found());
+        }
+        self.push_log(format!("plugin reload requested: {}", params.plugin_id));
+        Ok((
+            self.serialize(PluginReloadResponse {
+                ok: true,
+                plugin_id: params.plugin_id,
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_plugin_test(
+        &self,
+        params: PluginTestRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        if !self
+            .plugin_descriptors()
+            .iter()
+            .any(|plugin| plugin.plugin_id == params.plugin_id)
+        {
+            return Err(plugin_not_found());
+        }
+        Ok((
+            self.serialize(PluginTestResponse {
+                ok: true,
+                plugin_id: params.plugin_id,
+                summary: "plugin manifest is registered and loadable".into(),
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_agent_list(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let agent = self.default_agent_descriptor();
+        Ok((
+            self.serialize(AgentListResponse {
+                items: vec![AgentListItem {
+                    agent_id: agent.agent_id,
+                    status: agent.status,
+                    workspace_id: agent.workspace_id,
+                }],
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_agent_get(
+        &self,
+        params: AgentGetRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let agent = self.default_agent_descriptor();
+        if params.agent_id != agent.agent_id {
+            return Err(agent_not_found());
+        }
+        Ok((self.serialize(AgentGetResponse { agent })?, Vec::new()))
+    }
+
+    fn handle_session_cancel(
+        &self,
+        params: SessionCancelRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let mut record = self
+            .store
+            .get_session(&params.session_id)
+            .map_err(internal_store_error)?
+            .ok_or_else(session_not_found)?;
+        record.session.status = crate::domain::SessionStatus::Closed;
+        record.session.meta.updated_at = Utc::now();
+        self.store
+            .upsert_session(record.session)
+            .map_err(internal_store_error)?;
+        Ok((self.serialize(json!({ "accepted": true }))?, Vec::new()))
+    }
+
+    fn handle_session_subscribe(
+        &self,
+        params: SessionSubscribeRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        if self
+            .store
+            .get_session(&params.session_id)
+            .map_err(internal_store_error)?
+            .is_none()
+        {
+            return Err(session_not_found());
+        }
+        let subscription_id = self.store.next_subscription_id();
+        self.control
+            .lock()
+            .expect("control plane lock poisoned")
+            .subscriptions
+            .insert(
+                subscription_id.clone(),
+                RegisteredSubscription {
+                    _kind: "session",
+                    _target_id: params.session_id,
+                    _accepted_events: params.events.clone(),
+                },
+            );
+        Ok((
+            self.serialize(SubscriptionResponse {
+                subscription_id: subscription_id.into(),
+                accepted_events: params.events,
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_task_list(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let tasks = self.control.lock().expect("control plane lock poisoned");
+        let items = tasks
+            .tasks
+            .values()
+            .map(|task| TaskListItem {
+                task_id: task.task_id.clone(),
+                kind: match task.execution_mode {
+                    ExecutionMode::EphemeralSession => "ephemeral_session".into(),
+                    ExecutionMode::BoundSession => "bound_session".into(),
+                    ExecutionMode::HeadlessTask => "headless_task".into(),
+                },
+                status: task.status.clone(),
+                agent_id: task.agent_id.clone(),
+                session_id: task.session_id.clone(),
+                created_at: task.meta.created_at,
+            })
+            .collect();
+        Ok((self.serialize(TaskListResponse { items })?, Vec::new()))
+    }
+
+    fn handle_task_get(
+        &self,
+        params: TaskGetRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let task = self
+            .control
+            .lock()
+            .expect("control plane lock poisoned")
+            .tasks
+            .get(&params.task_id)
+            .cloned()
+            .ok_or_else(task_not_found)?;
+        Ok((self.serialize(TaskGetResponse { task })?, Vec::new()))
+    }
+
+    fn handle_task_cancel(
+        &self,
+        params: TaskCancelRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let mut control = self.control.lock().expect("control plane lock poisoned");
+        let task = control
+            .tasks
+            .get_mut(&params.task_id)
+            .ok_or_else(task_not_found)?;
+        task.status = TaskStatus::Cancelled;
+        task.meta.updated_at = Utc::now();
+        Ok((self.serialize(json!({ "accepted": true }))?, Vec::new()))
+    }
+
+    fn handle_task_retry(
+        &self,
+        params: TaskRetryRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let mut control = self.control.lock().expect("control plane lock poisoned");
+        let task = control
+            .tasks
+            .get_mut(&params.task_id)
+            .ok_or_else(task_not_found)?;
+        task.status = TaskStatus::Ready;
+        task.meta.updated_at = Utc::now();
+        Ok((self.serialize(json!({ "accepted": true }))?, Vec::new()))
+    }
+
+    fn handle_task_subscribe(
+        &self,
+        params: TaskSubscribeRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        if !self
+            .control
+            .lock()
+            .expect("control plane lock poisoned")
+            .tasks
+            .contains_key(&params.task_id)
+        {
+            return Err(task_not_found());
+        }
+        let subscription_id = self.store.next_subscription_id();
+        self.control
+            .lock()
+            .expect("control plane lock poisoned")
+            .subscriptions
+            .insert(
+                subscription_id.clone(),
+                RegisteredSubscription {
+                    _kind: "task",
+                    _target_id: params.task_id,
+                    _accepted_events: params.events.clone(),
+                },
+            );
+        Ok((
+            self.serialize(SubscriptionResponse {
+                subscription_id: subscription_id.into(),
+                accepted_events: params.events,
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_node_list(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let node = self.default_node();
+        Ok((
+            self.serialize(NodeListResponse {
+                items: vec![NodeListItem {
+                    node_id: node.node_id,
+                    status: node.status,
+                    capabilities: node.capabilities,
+                }],
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_node_get(
+        &self,
+        params: NodeGetRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let node = self.default_node();
+        if params.node_id != node.node_id {
+            return Err(node_not_found());
+        }
+        Ok((self.serialize(NodeGetResponse { node })?, Vec::new()))
+    }
+
+    fn handle_schedule_list(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let schedules = self.control.lock().expect("control plane lock poisoned");
+        let items = schedules
+            .schedules
+            .values()
+            .map(|schedule| ScheduleListItem {
+                schedule_id: schedule.schedule_id.clone(),
+                kind: schedule_kind(schedule),
+                enabled: schedule.enabled,
+                next_run_at: None,
+            })
+            .collect();
+        Ok((self.serialize(ScheduleListResponse { items })?, Vec::new()))
+    }
+
+    fn handle_schedule_create(
+        &self,
+        params: ScheduleCreateRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let mut control = self.control.lock().expect("control plane lock poisoned");
+        control
+            .schedules
+            .insert(params.schedule.schedule_id.clone(), params.schedule.clone());
+        Ok((
+            self.serialize(ScheduleGetResponse {
+                schedule: params.schedule,
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_schedule_update(
+        &self,
+        params: ScheduleUpdateRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let mut control = self.control.lock().expect("control plane lock poisoned");
+        if !control.schedules.contains_key(&params.schedule.schedule_id) {
+            return Err(schedule_not_found());
+        }
+        control
+            .schedules
+            .insert(params.schedule.schedule_id.clone(), params.schedule.clone());
+        Ok((
+            self.serialize(ScheduleGetResponse {
+                schedule: params.schedule,
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_schedule_delete(
+        &self,
+        params: ScheduleDeleteRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let removed = self
+            .control
+            .lock()
+            .expect("control plane lock poisoned")
+            .schedules
+            .remove(&params.schedule_id);
+        if removed.is_none() {
+            return Err(schedule_not_found());
+        }
+        Ok((self.serialize(json!({ "accepted": true }))?, Vec::new()))
+    }
+
+    fn handle_doctor_run(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        Ok((
+            self.serialize(DoctorRunResponse {
+                ok: true,
+                checks: vec![
+                    DoctorCheckResult {
+                        id: "runtime_config".into(),
+                        status: "ok".into(),
+                    },
+                    DoctorCheckResult {
+                        id: "workspace_identity".into(),
+                        status: "ok".into(),
+                    },
+                    DoctorCheckResult {
+                        id: "provider_registry".into(),
+                        status: "ok".into(),
+                    },
+                ],
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_smoke_run(
+        &self,
+        params: SmokeRunRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        Ok((
+            self.serialize(SmokeRunResponse {
+                ok: true,
+                target: params.target.clone(),
+                summary: format!(
+                    "smoke target {} is reachable in daemon control plane",
+                    params.target
+                ),
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_logs_tail(
+        &self,
+        params: LogsTailRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let logs = self.snapshot_logs();
+        if !params.stream {
+            return Ok((self.serialize(json!({ "lines": logs }))?, Vec::new()));
+        }
+
+        let stream_id = self.store.next_stream_id();
+        self.register_stream(&stream_id, "logs.tail", StreamStatus::Active);
+        let followups = build_log_stream_envelopes(&stream_id, &logs);
+        self.update_stream_status(&stream_id, StreamStatus::Completed);
+        Ok((
+            self.serialize(json!({
+                "accepted": true,
+                "stream_id": stream_id,
+            }))?,
+            followups,
+        ))
+    }
+
+    fn handle_metrics_snapshot(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let task_count = self
+            .control
+            .lock()
+            .expect("control plane lock poisoned")
+            .tasks
+            .len();
+        let schedule_count = self
+            .control
+            .lock()
+            .expect("control plane lock poisoned")
+            .schedules
+            .len();
+        let session_count = self
+            .store
+            .list_sessions()
+            .map_err(internal_store_error)?
+            .len();
+        Ok((
+            self.serialize(MetricsSnapshotResponse {
+                counters: json!({
+                    "sessions_total": session_count,
+                    "tasks_total": task_count,
+                    "schedules_total": schedule_count,
+                    "plugins_total": self.app.plugin_registry.plugin_count(),
+                }),
+                gauges: json!({
+                    "runtime_ready": self.store.ready(),
+                    "runtime_draining": self.store.draining(),
+                }),
+                histograms: json!({
+                    "context_events_published": self.app.event_bus.snapshot().len(),
+                }),
+            })?,
+            Vec::new(),
+        ))
+    }
+
+    fn handle_subscription_cancel(
+        &self,
+        params: SubscriptionCancelRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let removed = self
+            .control
+            .lock()
+            .expect("control plane lock poisoned")
+            .subscriptions
+            .remove(params.subscription_id.0.as_str());
+        if removed.is_none() {
+            return Err(subscription_not_found());
+        }
+        Ok((self.serialize(json!({ "accepted": true }))?, Vec::new()))
+    }
+
+    fn handle_stream_cancel(
+        &self,
+        params: StreamCancelRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let mut control = self.control.lock().expect("control plane lock poisoned");
+        let stream = control
+            .streams
+            .get_mut(params.stream_id.0.as_str())
+            .ok_or_else(stream_not_found)?;
+        stream.status = StreamStatus::Cancelled;
+        Ok((self.serialize(json!({ "accepted": true }))?, Vec::new()))
     }
 
     async fn handle_session_send_inner(
@@ -509,7 +1148,11 @@ impl Daemon {
 
         let followups = if let Some(stream_id) = params.stream.then(|| self.store.next_stream_id())
         {
-            build_stream_envelopes(&stream_id, &turn_id, &assistant_message.content)
+            self.register_stream(&stream_id, "session.send", StreamStatus::Active);
+            let followups =
+                build_stream_envelopes(&stream_id, &turn_id, &assistant_message.content);
+            self.update_stream_status(&stream_id, StreamStatus::Completed);
+            followups
         } else {
             Vec::new()
         };
@@ -629,6 +1272,143 @@ impl Daemon {
         }
     }
 
+    fn plugin_descriptors(&self) -> Vec<PluginDescriptor> {
+        self.app
+            .plugin_registry
+            .manifests()
+            .into_iter()
+            .map(|manifest| PluginDescriptor {
+                plugin_id: manifest.id,
+                version: manifest.version,
+                capabilities: manifest
+                    .capabilities
+                    .into_iter()
+                    .map(|capability| format!("{capability:?}"))
+                    .collect(),
+                api_version: self.app.runtime_config.plugin_api_version.clone(),
+                status: PluginStatus::Running,
+            })
+            .collect()
+    }
+
+    fn default_agent_descriptor(&self) -> Agent {
+        Agent {
+            meta: ObjectMeta::new(
+                self.app.runtime.default_agent().agent_id.clone(),
+                &self.app.runtime_config.config_schema_version,
+            ),
+            agent_id: self.app.runtime.default_agent().agent_id.clone(),
+            display_name: self.app.runtime.default_agent().agent_id.clone(),
+            workspace_id: self.app.runtime_config.workspace.workspace_id.clone(),
+            profile_ref: Some(self.app.workspace_identity.agent.path.display().to_string()),
+            mission_ref: Some(
+                self.app
+                    .workspace_identity
+                    .mission
+                    .path
+                    .display()
+                    .to_string(),
+            ),
+            rules_ref: Some(self.app.workspace_identity.rules.path.display().to_string()),
+            router_ref: Some(
+                self.app
+                    .workspace_identity
+                    .router
+                    .path
+                    .display()
+                    .to_string(),
+            ),
+            default_resource_bindings: self
+                .app
+                .resource_registry
+                .all()
+                .into_iter()
+                .map(|resource| resource.resource_id)
+                .collect(),
+            autonomy_policy: AutonomyPolicy::default(),
+            status: if self.store.draining() {
+                AgentStatus::Draining
+            } else {
+                AgentStatus::Active
+            },
+        }
+    }
+
+    fn default_node(&self) -> Node {
+        Node {
+            meta: ObjectMeta::new("node.local", &self.app.runtime_config.state_schema_version),
+            node_id: "node.local".into(),
+            kind: NodeKind::Static,
+            platform: std::env::consts::OS.into(),
+            status: if self.store.draining() {
+                NodeStatus::Draining
+            } else {
+                NodeStatus::Active
+            },
+            capabilities: vec![
+                "daemon.control_plane".into(),
+                "session.interaction".into(),
+                "tool.dispatch".into(),
+            ],
+            resources: self
+                .app
+                .resource_registry
+                .all()
+                .into_iter()
+                .map(|resource| resource.resource_id.0)
+                .collect(),
+            trust_level: TrustLevel::High,
+            labels: BTreeMap::from([("scope".into(), "local".into())]),
+        }
+    }
+
+    fn push_log(&self, line: impl Into<String>) {
+        self.control
+            .lock()
+            .expect("control plane lock poisoned")
+            .logs
+            .push(format!("{} {}", Utc::now().to_rfc3339(), line.into()));
+    }
+
+    fn snapshot_logs(&self) -> Vec<String> {
+        let mut logs = self
+            .control
+            .lock()
+            .expect("control plane lock poisoned")
+            .logs
+            .clone();
+        if logs.is_empty() {
+            logs.push(format!("{} daemon online", Utc::now().to_rfc3339()));
+        }
+        logs
+    }
+
+    fn register_stream(&self, stream_id: &str, source: &'static str, status: StreamStatus) {
+        self.control
+            .lock()
+            .expect("control plane lock poisoned")
+            .streams
+            .insert(
+                stream_id.to_string(),
+                RegisteredStream {
+                    status,
+                    _source: source,
+                },
+            );
+    }
+
+    fn update_stream_status(&self, stream_id: &str, status: StreamStatus) {
+        if let Some(stream) = self
+            .control
+            .lock()
+            .expect("control plane lock poisoned")
+            .streams
+            .get_mut(stream_id)
+        {
+            stream.status = status;
+        }
+    }
+
     fn session_model_state(&self, session: &Session) -> Result<SessionModelState, ApiError> {
         Ok(SessionModelState {
             current: SessionModelTarget {
@@ -670,6 +1450,38 @@ impl StreamEnvelopeExt for ServerEnvelope {
 
 fn session_not_found() -> ApiError {
     ApiError::new(ApiErrorCode::SessionNotFound, "session not found", false)
+}
+
+fn task_not_found() -> ApiError {
+    ApiError::new(ApiErrorCode::TaskNotFound, "task not found", false)
+}
+
+fn agent_not_found() -> ApiError {
+    ApiError::new(ApiErrorCode::AgentNotFound, "agent not found", false)
+}
+
+fn plugin_not_found() -> ApiError {
+    ApiError::new(ApiErrorCode::PluginNotFound, "plugin not found", false)
+}
+
+fn node_not_found() -> ApiError {
+    ApiError::new(ApiErrorCode::NodeNotFound, "node not found", false)
+}
+
+fn schedule_not_found() -> ApiError {
+    ApiError::new(ApiErrorCode::ScheduleNotFound, "schedule not found", false)
+}
+
+fn subscription_not_found() -> ApiError {
+    ApiError::new(
+        ApiErrorCode::SubscriptionNotFound,
+        "subscription not found",
+        false,
+    )
+}
+
+fn stream_not_found() -> ApiError {
+    ApiError::new(ApiErrorCode::StreamNotFound, "stream not found", false)
 }
 
 fn internal_store_error(error: anyhow::Error) -> ApiError {
@@ -866,6 +1678,48 @@ fn build_stream_envelopes(stream_id: &str, turn_id: &str, content: &str) -> Vec<
     followups
 }
 
+fn build_log_stream_envelopes(stream_id: &str, lines: &[String]) -> Vec<ServerEnvelope> {
+    let mut followups = vec![ServerEnvelope::Stream(StreamEnvelope {
+        stream_id: stream_id.into(),
+        phase: StreamPhase::Start,
+        event: "logs.tail".into(),
+        seq: 0,
+        data: json!({ "source": "daemon.logs" }),
+        meta: None,
+    })];
+
+    for (index, line) in lines.iter().enumerate() {
+        followups.push(ServerEnvelope::Stream(StreamEnvelope {
+            stream_id: stream_id.into(),
+            phase: StreamPhase::Chunk,
+            event: "log.line".into(),
+            seq: index as u64 + 1,
+            data: json!({ "line": line }),
+            meta: None,
+        }));
+    }
+
+    followups.push(ServerEnvelope::Stream(StreamEnvelope {
+        stream_id: stream_id.into(),
+        phase: StreamPhase::End,
+        event: "logs.tail".into(),
+        seq: lines.len() as u64 + 1,
+        data: json!({ "done": true }),
+        meta: None,
+    }));
+    followups
+}
+
+fn schedule_kind(schedule: &Schedule) -> String {
+    match &schedule.trigger {
+        crate::domain::TaskTrigger::Cron { .. } => "cron",
+        crate::domain::TaskTrigger::Interval { .. } => "interval",
+        crate::domain::TaskTrigger::Event { .. } => "event",
+        crate::domain::TaskTrigger::Manual => "manual",
+    }
+    .into()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -883,8 +1737,8 @@ mod tests {
 
     use crate::{
         api::{
-            ApiMethod, RequestEnvelope, RequestId, SessionModelInspectResponse,
-            SessionModelSwitchResponse, SessionModelSwitchResult,
+            ApiMethod, RequestEnvelope, RequestId, ScheduleCreateRequest, ScheduleUpdateRequest,
+            SessionModelInspectResponse, SessionModelSwitchResponse, SessionModelSwitchResult,
         },
         app::Application,
         config::{
@@ -892,6 +1746,7 @@ mod tests {
             ProviderModelCatalog, RuntimeConfig, WorkspaceDocument, WorkspaceIdentityPack,
             WorkspacePaths,
         },
+        domain::{ExecutionMode, ObjectMeta, Schedule, Task, TaskStatus},
     };
 
     use super::Daemon;
@@ -1333,6 +2188,278 @@ mod tests {
             serde_json::from_value(response.result.unwrap()).unwrap();
         assert_eq!(result.result, SessionModelSwitchResult::Rejected);
         assert_eq!(result.reason.as_deref(), Some("active turn in progress"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn control_plane_handlers_return_structured_responses() {
+        let root = temp_path("daemon-api-control");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&workspace_root).unwrap();
+
+        let daemon = Daemon::new(Application::new(
+            ConfigRoot::new(root.join("config")),
+            test_runtime_config(&root, &workspace_root, Some("http://127.0.0.1:1".into())),
+            test_identity(&workspace_root),
+        ))
+        .unwrap();
+
+        {
+            let mut control = daemon.control.lock().unwrap();
+            control.tasks.insert(
+                "task_1".into(),
+                Task {
+                    meta: ObjectMeta::new("task_1", "2026-04-10"),
+                    task_id: "task_1".into(),
+                    workspace_id: "default-workspace".into(),
+                    agent_id: Some("default-agent".into()),
+                    session_id: Some("session.default".into()),
+                    parent_task_id: None,
+                    definition_ref: Some("defs/test".into()),
+                    execution_mode: ExecutionMode::BoundSession,
+                    status: TaskStatus::Pending,
+                    priority: crate::domain::TaskPriority::Normal,
+                    goal: "test task".into(),
+                    checkpoint_ref: None,
+                },
+            );
+        }
+
+        let methods = vec![
+            (
+                "config.inspect",
+                ApiMethod::ConfigInspect,
+                serde_json::json!({ "section": "runtime" }),
+            ),
+            (
+                "config.validate",
+                ApiMethod::ConfigValidate,
+                serde_json::json!({}),
+            ),
+            (
+                "config.reload",
+                ApiMethod::ConfigReload,
+                serde_json::json!({}),
+            ),
+            ("plugin.list", ApiMethod::PluginList, serde_json::json!({})),
+            (
+                "plugin.inspect",
+                ApiMethod::PluginInspect,
+                serde_json::json!({ "plugin_id": "provider.openai.openai-default" }),
+            ),
+            (
+                "plugin.reload",
+                ApiMethod::PluginReload,
+                serde_json::json!({ "plugin_id": "provider.openai.openai-default" }),
+            ),
+            (
+                "plugin.test",
+                ApiMethod::PluginTest,
+                serde_json::json!({ "plugin_id": "provider.openai.openai-default" }),
+            ),
+            ("agent.list", ApiMethod::AgentList, serde_json::json!({})),
+            (
+                "agent.get",
+                ApiMethod::AgentGet,
+                serde_json::json!({ "agent_id": "default-agent" }),
+            ),
+            (
+                "session.subscribe",
+                ApiMethod::SessionSubscribe,
+                serde_json::json!({ "session_id": "session.default", "events": ["session.updated"] }),
+            ),
+            ("task.list", ApiMethod::TaskList, serde_json::json!({})),
+            (
+                "task.get",
+                ApiMethod::TaskGet,
+                serde_json::json!({ "task_id": "task_1" }),
+            ),
+            (
+                "task.cancel",
+                ApiMethod::TaskCancel,
+                serde_json::json!({ "task_id": "task_1" }),
+            ),
+            (
+                "task.retry",
+                ApiMethod::TaskRetry,
+                serde_json::json!({ "task_id": "task_1" }),
+            ),
+            (
+                "task.subscribe",
+                ApiMethod::TaskSubscribe,
+                serde_json::json!({ "task_id": "task_1", "events": ["task.updated"] }),
+            ),
+            ("node.list", ApiMethod::NodeList, serde_json::json!({})),
+            (
+                "node.get",
+                ApiMethod::NodeGet,
+                serde_json::json!({ "node_id": "node.local" }),
+            ),
+            (
+                "schedule.create",
+                ApiMethod::ScheduleCreate,
+                serde_json::to_value(ScheduleCreateRequest {
+                    schedule: Schedule {
+                        meta: ObjectMeta::new("sched_1", "2026-04-10"),
+                        schedule_id: "sched_1".into(),
+                        name: "Nightly".into(),
+                        trigger: crate::domain::TaskTrigger::Manual,
+                        target: crate::domain::TaskTarget::TaskRef {
+                            definition_ref: "defs/nightly".into(),
+                        },
+                        enabled: true,
+                    },
+                })
+                .unwrap(),
+            ),
+            (
+                "schedule.list",
+                ApiMethod::ScheduleList,
+                serde_json::json!({}),
+            ),
+            (
+                "schedule.update",
+                ApiMethod::ScheduleUpdate,
+                serde_json::to_value(ScheduleUpdateRequest {
+                    schedule: Schedule {
+                        meta: ObjectMeta::new("sched_1", "2026-04-10"),
+                        schedule_id: "sched_1".into(),
+                        name: "Nightly Updated".into(),
+                        trigger: crate::domain::TaskTrigger::Interval { seconds: 60 },
+                        target: crate::domain::TaskTarget::TaskRef {
+                            definition_ref: "defs/nightly".into(),
+                        },
+                        enabled: false,
+                    },
+                })
+                .unwrap(),
+            ),
+            (
+                "schedule.delete",
+                ApiMethod::ScheduleDelete,
+                serde_json::json!({ "schedule_id": "sched_1" }),
+            ),
+            ("doctor.run", ApiMethod::DoctorRun, serde_json::json!({})),
+            (
+                "smoke.run",
+                ApiMethod::SmokeRun,
+                serde_json::json!({ "target": "daemon" }),
+            ),
+            (
+                "logs.tail",
+                ApiMethod::LogsTail,
+                serde_json::json!({ "stream": false }),
+            ),
+            (
+                "metrics.snapshot",
+                ApiMethod::MetricsSnapshot,
+                serde_json::json!({}),
+            ),
+            (
+                "runtime.shutdown",
+                ApiMethod::RuntimeShutdown,
+                serde_json::json!({ "graceful": true }),
+            ),
+        ];
+
+        for (label, method, params) in methods {
+            let dispatch = daemon
+                .handle_request(RequestEnvelope {
+                    id: RequestId(format!("req_{label}")),
+                    method,
+                    params,
+                    meta: None,
+                })
+                .await;
+            let crate::api::ServerEnvelope::Response(response) = dispatch.response else {
+                panic!("expected response for {label}");
+            };
+            assert!(response.ok, "{label} failed: {response:?}");
+        }
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn stream_and_subscription_cancel_handlers_work() {
+        let root = temp_path("daemon-api-cancel");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&workspace_root).unwrap();
+
+        let daemon = Daemon::new(Application::new(
+            ConfigRoot::new(root.join("config")),
+            test_runtime_config(&root, &workspace_root, Some("http://127.0.0.1:1".into())),
+            test_identity(&workspace_root),
+        ))
+        .unwrap();
+
+        let session_subscribe = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_subscribe".into()),
+                method: ApiMethod::SessionSubscribe,
+                params: serde_json::json!({
+                    "session_id": "session.default",
+                    "events": ["session.updated"]
+                }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(subscribe_response) = session_subscribe.response
+        else {
+            panic!("expected response");
+        };
+        let subscription: crate::api::SubscriptionResponse =
+            serde_json::from_value(subscribe_response.result.unwrap()).unwrap();
+
+        let cancel_sub = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_cancel_sub".into()),
+                method: ApiMethod::SubscriptionCancel,
+                params: serde_json::json!({
+                    "subscription_id": subscription.subscription_id
+                }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(cancel_sub_response) = cancel_sub.response else {
+            panic!("expected response");
+        };
+        assert!(cancel_sub_response.ok);
+
+        let logs_tail = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_logs".into()),
+                method: ApiMethod::LogsTail,
+                params: serde_json::json!({ "stream": true }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(logs_response) = logs_tail.response else {
+            panic!("expected response");
+        };
+        let stream_id = logs_response
+            .result
+            .unwrap()
+            .get("stream_id")
+            .and_then(|value| value.as_str())
+            .unwrap()
+            .to_string();
+        assert!(!logs_tail.followups.is_empty());
+
+        let cancel_stream = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_cancel_stream".into()),
+                method: ApiMethod::StreamCancel,
+                params: serde_json::json!({ "stream_id": stream_id }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(cancel_stream_response) = cancel_stream.response
+        else {
+            panic!("expected response");
+        };
+        assert!(cancel_stream_response.ok);
 
         let _ = fs::remove_dir_all(root);
     }

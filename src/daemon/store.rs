@@ -31,6 +31,7 @@ pub struct DaemonStore {
     next_turn: AtomicU64,
     next_event: AtomicU64,
     next_stream: AtomicU64,
+    next_subscription: AtomicU64,
     active_turn_sessions: Mutex<BTreeSet<String>>,
     persistence: Arc<dyn PersistenceStore>,
 }
@@ -50,6 +51,7 @@ impl DaemonStore {
             next_turn: AtomicU64::new(1),
             next_event: AtomicU64::new(1),
             next_stream: AtomicU64::new(1),
+            next_subscription: AtomicU64::new(1),
             active_turn_sessions: Mutex::new(BTreeSet::new()),
             persistence,
         };
@@ -67,6 +69,10 @@ impl DaemonStore {
 
     pub fn draining(&self) -> bool {
         self.draining.load(Ordering::Relaxed)
+    }
+
+    pub fn set_draining(&self, draining: bool) {
+        self.draining.store(draining, Ordering::Relaxed);
     }
 
     pub fn next_connection_id(&self) -> String {
@@ -92,6 +98,11 @@ impl DaemonStore {
     pub fn next_stream_id(&self) -> String {
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed);
         format!("str_{id}")
+    }
+
+    pub fn next_subscription_id(&self) -> String {
+        let id = self.next_subscription.fetch_add(1, Ordering::Relaxed);
+        format!("sub_{id}")
     }
 
     pub fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
