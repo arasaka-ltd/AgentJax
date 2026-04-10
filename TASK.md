@@ -13,6 +13,50 @@
 当前目标不是继续脑暴，而是把项目分批次做成一个真正能加载 workspace、能组上下文、能执行工具、能持久化 session 的 agent runtime。
 
 ---
+## Blocking Track A: Config Bootstrap + OpenAI Provider Testability
+
+这是一条测试解锁支线。
+
+原因：
+- 当前 config 还不完善，几乎没法稳定做真实 LLM 交互测试
+- 如果这条线不先做，后续 context / tool / memory 的实际效果很难验证
+
+执行规则：
+- 这条支线优先于 `Batch 2`
+- 目标不是一次做完整配置平台，而是先把“可初始化、可配置、可测试”做出来
+
+- [x] 实现 config root 自动初始化：
+  - 生成 `core.toml`
+  - 生成 `providers.toml`
+  - 生成 `models.toml`
+  - 生成 `resources.toml`
+  - 生成 `daemon.toml`
+  - 生成最小 `workspace/` 样板
+- [x] 初始化逻辑支持“缺失则生成、已存在不覆盖”的幂等行为
+- [x] 提供本地开发初始化入口：
+  - CLI 命令或等价入口
+  - `minimal` 或 `local-dev` 模式
+- [x] 完善 OpenAI provider 配置模型：
+  - `api_key` 或 env ref
+  - `base_url`
+  - organization / project 等可选项
+  - 代理提供商 base URL 覆盖
+- [x] 实现 OpenAI provider 模型列表拉取
+- [x] 对模型列表做筛选，得到语言模型集合
+- [x] 获取并归一化模型信息：
+  - model id
+  - display label
+  - context length
+  - input/output token limits
+  - capability tags
+- [x] 让 `models.toml` 或等价配置快照能消费上述模型信息
+- [x] 增加最小诊断/测试能力：
+  - 列出 provider
+  - 列出语言模型
+  - 打印模型信息
+  - 验证 `base_url` 代理配置是否生效
+- [x] 保证完成后，能通过真实配置发起一次 LLM 测试请求
+
 ## Batch 1: Workspace Persona + Context v0
 - [x] 实现 workspace 文件真实加载：
   - `AGENT.md`
@@ -33,19 +77,55 @@
 - [x] 为 workspace 加载和 context assembly 补最小测试或可验证样例
 
 ## Batch 2: Tool Calling v0
-- [ ] 实现 `ToolRegistry`
-- [ ] 定义 tool plugin 的最小调用接口
-- [ ] 实现 `read_file`
-- [ ] 实现 `list_files`
-- [ ] 实现 `shell`
-- [ ] 实现最小 tool calling loop：
+- [x] 实现 `ToolRegistry`
+- [x] 定义 tool plugin 的最小调用接口
+- [x] 实现 `read_file`
+- [x] 实现 `list_files`
+- [x] 实现 `shell`
+- [x] 实现最小 tool calling loop：
   - 模型请求
   - tool call 识别
   - tool dispatch
   - tool result 回写
   - 二次模型调用
-- [ ] 将 tool 调用过程写入 `RuntimeEvent`
-- [ ] 为 tool timeout / basic error / idempotency 留出最小边界
+- [x] 将 tool 调用过程写入 `RuntimeEvent`
+- [x] 为 tool timeout / basic error / idempotency 留出最小边界
+
+## Blocking Track B: Prompt Injection + XML Assembly
+
+这是一条插在 `Batch 3` 之前的结构化注入支线。
+
+原因：
+- 现在虽然有 tools，但 prompt 注入边界不清
+- Agent 需要通过明确的协议知道自己有哪些工具
+- workspace 核心文件也需要固定 Markdown 约束，不能任意写再直接裸塞
+
+执行规则：
+- 这条支线优先于 `Batch 3`
+- 目标是先把 prompt assembly 协议、workspace Markdown 约束和 XML 注入落地
+
+- [x] 撰写 `docs/PROMPT_ASSEMBLY_SPEC.md`
+- [x] 定义 `PromptDocument` / `PromptSection` / `PromptFragment` 或等价中间模型
+- [x] 定义 workspace 核心文件的受约束 Markdown 结构解析规则
+- [x] 定义工具注入的 XML 结构
+- [x] 定义 memory / knowledge / task / latest_user_message 的 XML 结构
+- [x] 让 `assemble_context()` 与 `render_prompt_xml()` 显式分层
+- [x] 将当前字符串拼接 prompt 替换为 XML 渲染
+- [x] 保证 Agent 能在 prompt 中明确感知工具可用性
+- [x] 子改进：定义统一的结构化消息注入 schema：
+  - user message
+  - assistant message
+  - tool result message
+  - system / runtime message
+- [x] 子改进：为每条消息定义 `meta + content` 结构：
+  - message id
+  - session id
+  - channel / surface
+  - user id / actor id
+  - timestamp
+  - locale / extra metadata
+- [x] 子改进：将 `latest_user_message` 扩展为统一 message XML 节点
+- [x] 子改进：保证用户原文内容与程序推断字段分离，避免模型把推断当事实
 
 ## Batch 3: Session / Event Persistence
 - [ ] 落地 `sqlite_sessions` 最小实现

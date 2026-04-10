@@ -180,7 +180,7 @@ impl TuiApp {
                     vec![
                         Line::from(vec![
                             Span::styled(
-                                format!("{}: ", message.role),
+                                format!("{}: ", message.display_role()),
                                 Style::default().add_modifier(Modifier::BOLD),
                             ),
                             Span::raw(&message.content),

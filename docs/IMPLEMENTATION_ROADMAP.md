@@ -36,6 +36,7 @@
 当前代码库仍缺：
 - workspace 人格文件真实加载
 - context assembly 真实现
+- 可初始化、可测试的 config / provider 配置链路
 - tool calling loop
 - 持久化 session/event store
 - memory / RAG 检索闭环
@@ -43,6 +44,27 @@
 
 ---
 ## 4. 分批线路
+### Blocking Track A：Config Bootstrap + OpenAI Provider Testability
+目标：
+- 先解除“几乎没法稳定做真实 LLM 测试”的阻塞
+- 让项目具备最小可初始化、可配置、可验证的 provider 链路
+
+做完的判定标准：
+- config root 可自动初始化生成最小配置文件
+- OpenAI provider 可配置 `base_url`
+- 可获取 provider 模型列表
+- 可筛出语言模型
+- 可查看模型信息，例如上下文长度和 token 上限
+- 可通过真实配置发起一次 LLM 请求
+
+为什么这条线要插队：
+- 当前它是测试阻塞项
+- 如果没有这条线，后续 tool/context/memory 的真实效果都很难验证
+
+与主线关系：
+- 它是支线，但优先级高于 `Batch 2`
+- 做完后继续主线
+
 ### Batch 1：Workspace Persona + Context v0
 目标：
 - agent 不再是裸 prompt
@@ -68,6 +90,31 @@
 
 为什么第二批做：
 - 这是从“可聊天”变成“可执行”的关键分水岭
+- 但前提是 `Blocking Track A` 已完成，否则真实测试面不够
+
+### Blocking Track B：Prompt Injection + XML Assembly
+目标：
+- 在进入 persistence 前，先把 prompt 注入协议定型
+- 让 agent 通过结构化 XML 明确理解身份、规则、工具、记忆和当前用户输入
+
+做完的判定标准：
+- workspace Markdown 有受约束格式
+- runtime 有 prompt 中间模型
+- prompt 最终以 XML 注入给模型
+- tools 已经通过 XML 显式暴露给模型
+- 结构化 message schema 已经排入该支线后续子任务
+
+为什么插在这里：
+- 当前它是“工具虽有但模型未必清楚知道”的结构性问题
+- 如果这层不定，后面 memory / task / persistence 接入后 prompt 只会越来越乱
+
+与主线关系：
+- 它是支线，但优先级高于 `Batch 3`
+- 做完后继续主线
+
+支线内部顺序建议：
+1. 先完成 workspace/tool XML 主协议
+2. 再完成 structured message injection 子改进
 
 ### Batch 3：Session / Event Persistence
 目标：
@@ -125,6 +172,8 @@
 每一批都应遵守：
 - 批内任务可并行思考，但提交顺序必须保证主链路先通
 - 没完成上一批，不进入下一批
+- `Blocking Track A` 未完成前，不进入 `Batch 2`
+- `Blocking Track B` 未完成前，不进入 `Batch 3`
 - 新增 schema 必须尽量立刻接线，不要继续累计未实现类型
 - 每一批结束必须运行：
   - `cargo fmt`
@@ -142,6 +191,10 @@
 - 完成一项就勾掉一项
 - 不重新发明新的优先级排序，除非发现 blocker
 - 如果遇到 blocker，先最小化解决 blocker，再继续原批次
+
+特殊说明：
+- 当前默认先完成 `Blocking Track A`
+- `Batch 2` 完成后，默认先完成 `Blocking Track B`
 
 ---
 ## 7. 硬结论

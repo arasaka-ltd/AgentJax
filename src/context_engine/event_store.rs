@@ -28,13 +28,26 @@ impl EventStore {
             })
             .filter_map(|event| {
                 if let Some(message) = event.payload.get("message") {
-                    let role = message.get("role")?.as_str()?;
+                    let role = message
+                        .get("role")
+                        .and_then(|value| value.as_str())
+                        .or_else(|| message.get("kind").and_then(|value| value.as_str()))
+                        .unwrap_or("user");
                     let content = message.get("content")?.as_str()?;
                     return Some(format!("{role}: {content}"));
                 }
 
-                if let Some(message) = event.payload.get("assistant_message")?.as_str() {
-                    return Some(format!("assistant: {message}"));
+                if let Some(message) = event.payload.get("assistant_message") {
+                    if let Some(text) = message.as_str() {
+                        return Some(format!("assistant: {text}"));
+                    }
+                    let role = message
+                        .get("role")
+                        .and_then(|value| value.as_str())
+                        .or_else(|| message.get("kind").and_then(|value| value.as_str()))
+                        .unwrap_or("assistant");
+                    let content = message.get("content")?.as_str()?;
+                    return Some(format!("{role}: {content}"));
                 }
 
                 None

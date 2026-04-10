@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::api::{StreamId, SubscriptionId};
 use crate::domain::{
@@ -269,10 +270,124 @@ pub struct SessionGetResponse {
     pub events: Vec<crate::domain::RuntimeEvent>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMessageKind {
+    #[default]
+    User,
+    Assistant,
+    ToolResult,
+    System,
+    Runtime,
+}
+
+impl SessionMessageKind {
+    pub fn as_role_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::ToolResult => "tool_result",
+            Self::System => "system",
+            Self::Runtime => "runtime",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SessionMessageMeta {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionMessageAnnotation {
+    pub kind: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionMessage {
-    pub role: String,
+    #[serde(default)]
+    pub kind: SessionMessageKind,
+    #[serde(default)]
+    pub meta: SessionMessageMeta,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<SessionMessageAnnotation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+}
+
+impl SessionMessage {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            kind: SessionMessageKind::User,
+            meta: SessionMessageMeta::default(),
+            content: content.into(),
+            annotations: Vec::new(),
+            role: Some("user".into()),
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            kind: SessionMessageKind::Assistant,
+            meta: SessionMessageMeta::default(),
+            content: content.into(),
+            annotations: Vec::new(),
+            role: Some("assistant".into()),
+        }
+    }
+
+    pub fn tool_result(content: impl Into<String>) -> Self {
+        Self {
+            kind: SessionMessageKind::ToolResult,
+            meta: SessionMessageMeta::default(),
+            content: content.into(),
+            annotations: Vec::new(),
+            role: Some("tool_result".into()),
+        }
+    }
+
+    pub fn runtime(content: impl Into<String>) -> Self {
+        Self {
+            kind: SessionMessageKind::Runtime,
+            meta: SessionMessageMeta::default(),
+            content: content.into(),
+            annotations: Vec::new(),
+            role: Some("runtime".into()),
+        }
+    }
+
+    pub fn normalized_kind(&self) -> SessionMessageKind {
+        match (self.kind.clone(), self.role.as_deref()) {
+            (SessionMessageKind::User, Some("assistant")) => SessionMessageKind::Assistant,
+            (SessionMessageKind::User, Some("tool_result")) => SessionMessageKind::ToolResult,
+            (SessionMessageKind::User, Some("system")) => SessionMessageKind::System,
+            (SessionMessageKind::User, Some("runtime")) => SessionMessageKind::Runtime,
+            (kind, _) => kind,
+        }
+    }
+
+    pub fn display_role(&self) -> &str {
+        self.role
+            .as_deref()
+            .unwrap_or_else(|| self.normalized_kind().as_role_str())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

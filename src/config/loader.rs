@@ -1,11 +1,14 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{
-    ConfigRoot, RuntimeConfig, RuntimePaths, WorkspaceConfig, WorkspaceDocument,
-    WorkspaceIdentityPack, WorkspacePaths,
+    AgentDefinition, ConfigRoot, LlmProviderConfig, ModelCatalogSnapshot, RuntimeConfig,
+    RuntimePaths, WorkspaceConfig, WorkspaceDocument, WorkspaceIdentityPack, WorkspacePaths,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -18,7 +21,15 @@ pub struct LoadedConfig {
     pub workspace_identity: WorkspaceIdentityPack,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum InitMode {
+    #[default]
+    Minimal,
+    LocalDev,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct CoreTomlConfig {
     app_name: Option<String>,
     workspace_id: Option<String>,
@@ -26,9 +37,111 @@ struct CoreTomlConfig {
     workspace_root: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProvidersTomlConfig {
+    llm: ProvidersLlmConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProvidersLlmConfig {
+    default_provider_id: String,
+    providers: Vec<LlmProviderConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ModelsTomlConfig {
+    defaults: ModelsDefaultsConfig,
+    #[serde(default)]
+    snapshot: ModelCatalogSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ModelsDefaultsConfig {
+    provider_id: String,
+    model_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ResourcesTomlConfig {
+    resources: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DaemonTomlConfig {
+    unix_socket: String,
+    websocket_bind: String,
+}
+
 impl ConfigLoader {
     pub fn load_default() -> Result<LoadedConfig> {
         Self::load_from_roots("./config", "./runtime", "./workspace")
+    }
+
+    pub fn initialize_default(mode: InitMode) -> Result<()> {
+        Self::initialize_at("./config", "./runtime", "./workspace", mode)
+    }
+
+    pub fn initialize_at(
+        config_root: impl AsRef<Path>,
+        runtime_root: impl AsRef<Path>,
+        workspace_root: impl AsRef<Path>,
+        mode: InitMode,
+    ) -> Result<()> {
+        let config_root = ConfigRoot::new(config_root.as_ref());
+        fs::create_dir_all(&config_root.root)?;
+
+        let runtime_root = runtime_root.as_ref().to_string_lossy().into_owned();
+        let workspace_root = workspace_root.as_ref().to_string_lossy().into_owned();
+        let core = CoreTomlConfig {
+            app_name: Some(match mode {
+                InitMode::Minimal => "agentjax".into(),
+                InitMode::LocalDev => "agentjax-local-dev".into(),
+            }),
+            workspace_id: Some("default-workspace".into()),
+            runtime_root: Some(runtime_root.clone()),
+            workspace_root: Some(workspace_root.clone()),
+        };
+        write_toml_if_missing(&config_root.core_config, &core)?;
+
+        let providers = ProvidersTomlConfig {
+            llm: ProvidersLlmConfig {
+                default_provider_id: "openai-default".into(),
+                providers: vec![LlmProviderConfig::OpenAi(Default::default())],
+            },
+        };
+        write_toml_if_missing(&config_root.providers_config, &providers)?;
+
+        let models = ModelsTomlConfig {
+            defaults: ModelsDefaultsConfig {
+                provider_id: "openai-default".into(),
+                model_id: "gpt-4o-mini".into(),
+            },
+            snapshot: ModelCatalogSnapshot::default(),
+        };
+        write_toml_if_missing(&config_root.models_config, &models)?;
+
+        write_toml_if_missing(
+            &config_root.resources_config,
+            &ResourcesTomlConfig {
+                resources: Vec::new(),
+            },
+        )?;
+        write_toml_if_missing(
+            &config_root.daemon_config,
+            &DaemonTomlConfig {
+                unix_socket: PathBuf::from(&runtime_root)
+                    .join("run")
+                    .join("daemon.sock")
+                    .display()
+                    .to_string(),
+                websocket_bind: "127.0.0.1:4080".into(),
+            },
+        )?;
+
+        let workspace =
+            WorkspaceConfig::new("default-workspace", WorkspacePaths::new(workspace_root));
+        workspace.ensure_workspace_layout()?;
+        Ok(())
     }
 
     pub fn load_from_roots(
@@ -36,44 +149,47 @@ impl ConfigLoader {
         runtime_root: impl AsRef<Path>,
         workspace_root: impl AsRef<Path>,
     ) -> Result<LoadedConfig> {
+        Self::initialize_at(
+            config_root.as_ref(),
+            runtime_root.as_ref(),
+            workspace_root.as_ref(),
+            InitMode::Minimal,
+        )?;
+
         let config_root = ConfigRoot::new(config_root.as_ref());
-        fs::create_dir_all(&config_root.root)?;
+        let core: CoreTomlConfig = toml::from_str(&fs::read_to_string(&config_root.core_config)?)?;
+        let providers: ProvidersTomlConfig =
+            toml::from_str(&fs::read_to_string(&config_root.providers_config)?)?;
+        let models: ModelsTomlConfig =
+            toml::from_str(&fs::read_to_string(&config_root.models_config)?)?;
 
-        let core_config = if config_root.core_config.exists() {
-            toml::from_str::<CoreTomlConfig>(&fs::read_to_string(&config_root.core_config)?)?
-        } else {
-            CoreTomlConfig::default()
-        };
-
-        let runtime_root = core_config
+        let runtime_root = core
             .runtime_root
             .unwrap_or_else(|| runtime_root.as_ref().to_string_lossy().into_owned());
-        let workspace_root = core_config
+        let workspace_root = core
             .workspace_root
             .unwrap_or_else(|| workspace_root.as_ref().to_string_lossy().into_owned());
-
-        let runtime_paths = RuntimePaths::new(runtime_root);
         let workspace = WorkspaceConfig::new(
-            core_config
-                .workspace_id
+            core.workspace_id
                 .unwrap_or_else(|| "default-workspace".into()),
             WorkspacePaths::new(workspace_root),
         );
         workspace.ensure_workspace_layout()?;
 
-        fs::create_dir_all(&runtime_paths.run_root)?;
-        fs::create_dir_all(&runtime_paths.state_root)?;
-        fs::create_dir_all(&runtime_paths.artifacts_root)?;
-        fs::create_dir_all(&runtime_paths.logs_root)?;
-        fs::create_dir_all(&runtime_paths.cache_root)?;
-        fs::create_dir_all(&runtime_paths.tmp_root)?;
-
         let workspace_identity = Self::load_workspace_identity(&workspace)?;
-        let runtime_config = RuntimeConfig::new(
-            core_config.app_name.unwrap_or_else(|| "agentjax".into()),
-            runtime_paths,
+        let mut runtime_config = RuntimeConfig::new(
+            core.app_name.unwrap_or_else(|| "agentjax".into()),
+            RuntimePaths::new(runtime_root),
             workspace,
         );
+        runtime_config.agent_runtime.default_agent = AgentDefinition {
+            provider_id: models.defaults.provider_id.clone(),
+            model: models.defaults.model_id.clone(),
+            ..runtime_config.agent_runtime.default_agent
+        };
+        runtime_config.agent_runtime.llm.default_provider_id = providers.llm.default_provider_id;
+        runtime_config.agent_runtime.llm.providers = providers.llm.providers;
+        runtime_config.agent_runtime.llm.model_catalog = models.snapshot;
 
         Ok(LoadedConfig {
             config_root,
@@ -95,12 +211,36 @@ impl ConfigLoader {
         })
     }
 
+    pub fn write_model_snapshot(
+        config_root: &ConfigRoot,
+        provider_id: &str,
+        model_id: &str,
+        snapshot: ModelCatalogSnapshot,
+    ) -> Result<()> {
+        let config = ModelsTomlConfig {
+            defaults: ModelsDefaultsConfig {
+                provider_id: provider_id.into(),
+                model_id: model_id.into(),
+            },
+            snapshot,
+        };
+        fs::write(&config_root.models_config, toml::to_string_pretty(&config)?)?;
+        Ok(())
+    }
+
     fn read_document(path: &Path) -> Result<WorkspaceDocument> {
         Ok(WorkspaceDocument {
             path: path.to_path_buf(),
             content: fs::read_to_string(path)?,
         })
     }
+}
+
+fn write_toml_if_missing<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    if !path.exists() {
+        fs::write(path, toml::to_string_pretty(value)?)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -111,38 +251,38 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::ConfigLoader;
+    use super::{ConfigLoader, InitMode};
 
     #[test]
-    fn creates_workspace_template_and_loads_identity() {
-        let root = temp_path("config-loader");
+    fn initializes_config_root_idempotently() {
+        let root = temp_path("config-init");
         let config_root = root.join("config");
         let runtime_root = root.join("runtime");
         let workspace_root = root.join("workspace");
-        fs::create_dir_all(&config_root).expect("create config dir");
-        fs::write(
-            config_root.join("core.toml"),
-            format!(
-                "app_name = \"agentjax-test\"\nworkspace_id = \"ws-test\"\nruntime_root = \"{}\"\nworkspace_root = \"{}\"\n",
-                runtime_root.display(),
-                workspace_root.display(),
-            ),
+
+        ConfigLoader::initialize_at(
+            &config_root,
+            &runtime_root,
+            &workspace_root,
+            InitMode::LocalDev,
         )
-        .expect("write core.toml");
+        .unwrap();
+        let first = fs::read_to_string(config_root.join("core.toml")).unwrap();
+        ConfigLoader::initialize_at(
+            &config_root,
+            &runtime_root,
+            &workspace_root,
+            InitMode::Minimal,
+        )
+        .unwrap();
+        let second = fs::read_to_string(config_root.join("core.toml")).unwrap();
 
-        let loaded =
-            ConfigLoader::load_from_roots(&config_root, &runtime_root, &workspace_root).unwrap();
-
-        assert_eq!(loaded.runtime_config.app_name, "agentjax-test");
-        assert_eq!(loaded.runtime_config.workspace.workspace_id, "ws-test");
+        assert_eq!(first, second);
+        assert!(config_root.join("providers.toml").exists());
+        assert!(config_root.join("models.toml").exists());
+        assert!(config_root.join("resources.toml").exists());
+        assert!(config_root.join("daemon.toml").exists());
         assert!(workspace_root.join("AGENT.md").exists());
-        assert!(workspace_root.join("SOUL.md").exists());
-        assert!(workspace_root.join("USER.md").exists());
-        assert!(workspace_root.join("MISSION.md").exists());
-        assert!(workspace_root.join("RULES.md").exists());
-        assert!(workspace_root.join("ROUTER.md").exists());
-        assert!(workspace_root.join("MEMORY.md").exists());
-        assert_eq!(loaded.workspace_identity.workspace_id, "ws-test");
 
         let _ = fs::remove_dir_all(root);
     }

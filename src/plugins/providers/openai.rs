@@ -1,14 +1,21 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use reqwest::header::{
+    HeaderMap as ReqwestHeaderMap, HeaderValue as ReqwestHeaderValue, AUTHORIZATION,
+};
 use rig::{
     completion::Prompt,
     http_client::{HeaderMap, HeaderValue},
     prelude::CompletionClient,
     providers::openai,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::{AgentDefinition, OpenAiProviderConfig},
+    config::{
+        AgentDefinition, ModelCatalogSnapshot, ModelInfoSnapshot, OpenAiProviderConfig,
+        ProviderModelCatalog,
+    },
     core::{BillingPlugin, Plugin, PluginContext, ProviderPlugin, ResourceProviderPlugin},
     domain::{
         BillingBreakdownItem, BillingCapability, BillingConfidence, BillingMode, BillingRecord,
@@ -16,6 +23,28 @@ use crate::{
         ResourceDescriptor, ResourceId, ResourceKind, ResourceStatus, UsageCategory, UsageRecord,
     },
 };
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenAiRawModel {
+    pub id: String,
+    #[serde(default)]
+    pub created: Option<u64>,
+    #[serde(default)]
+    pub owned_by: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenAiModelCatalog {
+    pub provider_id: String,
+    pub base_url: String,
+    pub raw_models: Vec<OpenAiRawModel>,
+    pub language_models: Vec<ModelInfoSnapshot>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModelsResponse {
+    data: Vec<OpenAiRawModel>,
+}
 
 #[derive(Debug, Clone)]
 pub struct OpenAiProviderAdapter {
@@ -25,6 +54,14 @@ pub struct OpenAiProviderAdapter {
 impl OpenAiProviderAdapter {
     pub fn new(config: OpenAiProviderConfig) -> Self {
         Self { config }
+    }
+
+    pub fn provider_id(&self) -> &str {
+        &self.config.provider_id
+    }
+
+    pub fn effective_base_url(&self) -> String {
+        self.config.effective_base_url()
     }
 
     pub fn resources(&self) -> Vec<Resource> {
@@ -60,6 +97,69 @@ impl OpenAiProviderAdapter {
                 vec!["image.generation", "provider.openai"],
             ),
         ]
+    }
+
+    pub async fn list_models(&self) -> Result<OpenAiModelCatalog> {
+        let client = reqwest::Client::builder().build()?;
+        let mut headers = ReqwestHeaderMap::new();
+        let api_key = self.config.resolve_api_key()?;
+        headers.insert(
+            AUTHORIZATION,
+            ReqwestHeaderValue::from_str(&format!("Bearer {api_key}"))?,
+        );
+        if let Some(organization) = &self.config.organization {
+            headers.insert(
+                "OpenAI-Organization",
+                ReqwestHeaderValue::from_str(organization)?,
+            );
+        }
+        if let Some(project) = &self.config.project {
+            headers.insert("OpenAI-Project", ReqwestHeaderValue::from_str(project)?);
+        }
+
+        let response = client
+            .get(self.config.endpoint_url("models"))
+            .headers(headers)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "openai models request failed: status {}",
+                response.status()
+            ));
+        }
+
+        let raw: OpenAiModelsResponse = response.json().await?;
+        let language_models = self.language_models_from_raw(&raw.data);
+        Ok(OpenAiModelCatalog {
+            provider_id: self.config.provider_id.clone(),
+            base_url: self.effective_base_url(),
+            raw_models: raw.data,
+            language_models,
+        })
+    }
+
+    pub fn language_models_from_raw(
+        &self,
+        raw_models: &[OpenAiRawModel],
+    ) -> Vec<ModelInfoSnapshot> {
+        raw_models
+            .iter()
+            .filter(|model| is_language_model(&model.id))
+            .map(|model| normalize_model_info(&model.id))
+            .collect()
+    }
+
+    pub fn to_snapshot(&self, catalog: &OpenAiModelCatalog) -> ModelCatalogSnapshot {
+        ModelCatalogSnapshot {
+            generated_at: Some(chrono::Utc::now()),
+            providers: vec![ProviderModelCatalog {
+                provider_id: catalog.provider_id.clone(),
+                provider_kind: "openai".into(),
+                base_url: Some(catalog.base_url.clone()),
+                language_models: catalog.language_models.clone(),
+            }],
+        }
     }
 
     fn make_resource(
@@ -113,13 +213,22 @@ impl OpenAiProviderAdapter {
             builder = builder.base_url(base_url);
         }
 
+        let mut headers = HeaderMap::new();
         if let Some(organization) = &self.config.organization {
-            let mut headers = HeaderMap::new();
             headers.insert(
                 "OpenAI-Organization",
                 HeaderValue::from_str(organization)
                     .map_err(|error| anyhow!("invalid OpenAI organization header: {error}"))?,
             );
+        }
+        if let Some(project) = &self.config.project {
+            headers.insert(
+                "OpenAI-Project",
+                HeaderValue::from_str(project)
+                    .map_err(|error| anyhow!("invalid OpenAI project header: {error}"))?,
+            );
+        }
+        if !headers.is_empty() {
             builder = builder.http_headers(headers);
         }
 
@@ -269,5 +378,160 @@ impl BillingPlugin for OpenAiProviderPlugin {
             breakdown,
             generated_at: chrono::Utc::now(),
         }))
+    }
+}
+
+fn is_language_model(model_id: &str) -> bool {
+    let model_id = model_id.to_ascii_lowercase();
+    !model_id.contains("embed")
+        && !model_id.contains("tts")
+        && !model_id.contains("transcribe")
+        && !model_id.contains("whisper")
+        && !model_id.contains("moderation")
+        && !model_id.contains("image")
+}
+
+fn normalize_model_info(model_id: &str) -> ModelInfoSnapshot {
+    let lower = model_id.to_ascii_lowercase();
+    let (context_length, output_limit) = if lower.contains("gpt-4.1") {
+        (Some(1_047_576), Some(32_768))
+    } else if lower.contains("gpt-4o") {
+        (Some(128_000), Some(16_384))
+    } else if lower.contains("o3") || lower.contains("o4") {
+        (Some(200_000), Some(100_000))
+    } else {
+        (None, None)
+    };
+
+    let mut capability_tags = vec!["llm".into(), "text".into()];
+    if lower.contains("mini") {
+        capability_tags.push("small".into());
+    }
+    if lower.contains("vision") || lower.contains("4o") {
+        capability_tags.push("vision".into());
+    }
+    if lower.starts_with('o') {
+        capability_tags.push("reasoning".into());
+    }
+
+    ModelInfoSnapshot {
+        model_id: model_id.into(),
+        display_label: model_id.replace('-', " ").to_uppercase(),
+        context_length,
+        input_token_limit: context_length,
+        output_token_limit: output_limit,
+        capability_tags,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        task::JoinHandle,
+    };
+
+    use super::{
+        normalize_model_info, OpenAiProviderAdapter, OpenAiProviderConfig, OpenAiRawModel,
+    };
+    use crate::config::AgentDefinition;
+
+    #[tokio::test]
+    async fn lists_models_and_normalizes_language_models_from_base_url() {
+        let server = spawn_server(vec![(
+            "GET /v1/models HTTP/1.1",
+            r#"{"data":[{"id":"gpt-4o-mini"},{"id":"text-embedding-3-small"}]}"#,
+        )])
+        .await;
+        let config = OpenAiProviderConfig {
+            provider_id: "openai-default".into(),
+            api_key: Some("test-key".into()),
+            api_key_env: "OPENAI_API_KEY".into(),
+            base_url: Some(format!("http://{}", server.0)),
+            organization: None,
+            project: None,
+        };
+        let adapter = OpenAiProviderAdapter::new(config);
+
+        let catalog = adapter.list_models().await.unwrap();
+
+        assert_eq!(catalog.raw_models.len(), 2);
+        assert_eq!(catalog.language_models.len(), 1);
+        assert_eq!(catalog.language_models[0].model_id, "gpt-4o-mini");
+
+        server.1.abort();
+    }
+
+    #[tokio::test]
+    async fn prompt_text_uses_configured_base_url() {
+        let server = spawn_server(vec![(
+            "POST /responses HTTP/1.1",
+            r#"{"id":"resp_1","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"mocked reply","annotations":[]}]}],"tools":[]}"#,
+        )])
+        .await;
+        let config = OpenAiProviderConfig {
+            provider_id: "openai-default".into(),
+            api_key: Some("test-key".into()),
+            api_key_env: "OPENAI_API_KEY".into(),
+            base_url: Some(format!("http://{}", server.0)),
+            organization: None,
+            project: None,
+        };
+        let adapter = OpenAiProviderAdapter::new(config);
+        let response = adapter
+            .prompt_text(&AgentDefinition::default(), "hello")
+            .await
+            .unwrap();
+
+        assert_eq!(response, "mocked reply");
+        server.1.abort();
+    }
+
+    #[test]
+    fn filters_language_models() {
+        let adapter = OpenAiProviderAdapter::new(OpenAiProviderConfig::default());
+        let models = adapter.language_models_from_raw(&[
+            OpenAiRawModel {
+                id: "gpt-4o-mini".into(),
+                created: None,
+                owned_by: None,
+            },
+            OpenAiRawModel {
+                id: "text-embedding-3-small".into(),
+                created: None,
+                owned_by: None,
+            },
+        ]);
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model_id, "gpt-4o-mini");
+        let normalized = normalize_model_info("o4-mini");
+        assert!(normalized.capability_tags.contains(&"reasoning".into()));
+    }
+
+    async fn spawn_server(
+        responses: Vec<(&'static str, &'static str)>,
+    ) -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            for (expected_request_line, body) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = vec![0_u8; 8192];
+                let bytes = stream.read(&mut buffer).await.unwrap();
+                let request = String::from_utf8_lossy(&buffer[..bytes]);
+                assert!(request.contains(expected_request_line), "{request}");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (addr, handle)
     }
 }

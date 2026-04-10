@@ -24,6 +24,7 @@ pub struct DaemonStore {
     ready: AtomicBool,
     draining: AtomicBool,
     next_connection: AtomicU64,
+    next_message: AtomicU64,
     next_turn: AtomicU64,
     next_event: AtomicU64,
     next_stream: AtomicU64,
@@ -56,6 +57,7 @@ impl DaemonStore {
             ready: AtomicBool::new(true),
             draining: AtomicBool::new(false),
             next_connection: AtomicU64::new(1),
+            next_message: AtomicU64::new(1),
             next_turn: AtomicU64::new(1),
             next_event: AtomicU64::new(1),
             next_stream: AtomicU64::new(1),
@@ -83,6 +85,11 @@ impl DaemonStore {
     pub fn next_turn_id(&self) -> String {
         let id = self.next_turn.fetch_add(1, Ordering::Relaxed);
         format!("turn_{id}")
+    }
+
+    pub fn next_message_id(&self) -> String {
+        let id = self.next_message.fetch_add(1, Ordering::Relaxed);
+        format!("msg_{id}")
     }
 
     pub fn next_event_id(&self) -> String {

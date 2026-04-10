@@ -84,6 +84,7 @@ impl Default for AgentDefinition {
 pub struct LlmRuntimeConfig {
     pub default_provider_id: String,
     pub providers: Vec<LlmProviderConfig>,
+    pub model_catalog: ModelCatalogSnapshot,
 }
 
 impl Default for LlmRuntimeConfig {
@@ -91,6 +92,31 @@ impl Default for LlmRuntimeConfig {
         Self {
             default_provider_id: "openai-default".into(),
             providers: vec![LlmProviderConfig::OpenAi(OpenAiProviderConfig::default())],
+            model_catalog: ModelCatalogSnapshot::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ModelCatalogSnapshot {
+    pub generated_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub providers: Vec<ProviderModelCatalog>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderModelCatalog {
+    pub provider_id: String,
+    pub provider_kind: String,
+    pub base_url: Option<String>,
+    pub language_models: Vec<ModelInfoSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelInfoSnapshot {
+    pub model_id: String,
+    pub display_label: String,
+    pub context_length: Option<u32>,
+    pub input_token_limit: Option<u32>,
+    pub output_token_limit: Option<u32>,
+    pub capability_tags: Vec<String>,
 }

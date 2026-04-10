@@ -7,6 +7,7 @@ use crate::core::{
     ResourceRegistry, RuntimeHost, WorkspaceRuntime, WorkspaceRuntimeHost,
 };
 use crate::plugins::providers::openai::OpenAiProviderPlugin;
+use crate::plugins::tools::ToolRegistry;
 
 #[derive(Clone)]
 pub struct Application {
@@ -16,6 +17,7 @@ pub struct Application {
     pub plugin_host: PluginHost,
     pub workspace_host: WorkspaceRuntimeHost,
     pub runtime_host: RuntimeHost,
+    pub tool_registry: ToolRegistry,
     pub event_bus: EventBus,
     pub context_engine: Arc<dyn ContextEngine>,
     pub runtime: Arc<ApplicationRuntime>,
@@ -54,6 +56,7 @@ impl Application {
             event_bus.clone(),
             hook_bus,
         );
+        let tool_registry = ToolRegistry::builtins();
         let runtime = Arc::new(ApplicationRuntime::new(
             runtime_config.clone(),
             plugin_host.clone(),
@@ -68,6 +71,7 @@ impl Application {
             plugin_host,
             workspace_host,
             runtime_host,
+            tool_registry,
             event_bus,
             context_engine: Arc::new(WorkspaceContextEngine::new(workspace_identity)),
             runtime,

@@ -132,6 +132,14 @@ AgentJax 当前的正式架构规范由以下文档组成。
   - runtime config snapshot
   - config diff / reload plan
   - secret ref policy
+### Spec 11：Prompt Assembly
+- `docs/PROMPT_ASSEMBLY_SPEC.md`
+- 作用：定义 workspace Markdown 到结构化 prompt，再到 XML 注入的正式协议
+- 包括：
+  - Markdown source format
+  - prompt document / section / fragment 中间层
+  - tool / memory / knowledge / task 的 XML 注入格式
+  - `assemble_context()` 与 `render_prompt_xml()` 的分层
 ---
 ## 2.5 执行入口文件
 从这一轮开始，除了正式 spec 外，还必须配合两份执行文档：
@@ -332,6 +340,14 @@ src/
 5. memory / RAG v0
 6. daemon API completion
 7. task runtime v0
+
+当前存在一条优先级更高的测试解锁支线：
+- config bootstrap + OpenAI provider testability
+- 这条支线完成前，不进入 `tool calling v0`
+
+当前在 `Batch 2` 之后、`Batch 3` 之前，还存在一条结构化注入支线：
+- prompt injection + XML assembly
+- 这条支线完成前，不进入 `session / event persistence`
 
 详细批次顺序见：
 - `docs/IMPLEMENTATION_ROADMAP.md`
