@@ -14,7 +14,8 @@ pub use event_bus::EventBus;
 pub use hook_bus::HookBus;
 pub use persistence::{EventStore, PersistenceStore, SessionRecord, SessionStore};
 pub use plugin::{
-    BillingPlugin, Plugin, PluginContext, PluginHost, ProviderPlugin, ResourceProviderPlugin,
+    BackendPlugin, BillingPlugin, ContextPlugin, Plugin, PluginContext, PluginHost, PluginRef,
+    ProviderPlugin, ResourceProviderPlugin, StoragePlugin,
 };
 pub use registry::PluginRegistry;
 pub use reload::{ReloadInstruction, ReloadPlan};

@@ -1818,7 +1818,8 @@ mod tests {
             ConfigRoot::new(root.join("config")),
             runtime_config,
             identity,
-        );
+        )
+        .unwrap();
         let daemon = Daemon::new(app).unwrap();
 
         let send = daemon
@@ -1886,11 +1887,14 @@ mod tests {
             test_runtime_config(&root, &workspace_root, Some(format!("http://{}", server.0)));
         let identity = test_identity(&workspace_root);
 
-        let daemon = Daemon::new(Application::new(
-            ConfigRoot::new(root.join("config")),
-            runtime_config.clone(),
-            identity.clone(),
-        ))
+        let daemon = Daemon::new(
+            Application::new(
+                ConfigRoot::new(root.join("config")),
+                runtime_config.clone(),
+                identity.clone(),
+            )
+            .unwrap(),
+        )
         .unwrap();
 
         let send = daemon
@@ -1913,11 +1917,14 @@ mod tests {
         drop(daemon);
         server.1.abort();
 
-        let restarted = Daemon::new(Application::new(
-            ConfigRoot::new(root.join("config")),
-            runtime_config,
-            identity,
-        ))
+        let restarted = Daemon::new(
+            Application::new(
+                ConfigRoot::new(root.join("config")),
+                runtime_config,
+                identity,
+            )
+            .unwrap(),
+        )
         .unwrap();
 
         let list = restarted
@@ -2018,11 +2025,14 @@ mod tests {
         ]);
 
         let identity = test_identity(&workspace_root);
-        let daemon = Daemon::new(Application::new(
-            ConfigRoot::new(root.join("config")),
-            runtime_config.clone(),
-            identity.clone(),
-        ))
+        let daemon = Daemon::new(
+            Application::new(
+                ConfigRoot::new(root.join("config")),
+                runtime_config.clone(),
+                identity.clone(),
+            )
+            .unwrap(),
+        )
         .unwrap();
 
         let switch = daemon
@@ -2110,11 +2120,14 @@ mod tests {
             .any(|event| event.event_type == crate::domain::EventType::ModelSwitchApplied));
 
         drop(daemon);
-        let restarted = Daemon::new(Application::new(
-            ConfigRoot::new(root.join("config")),
-            runtime_config,
-            identity,
-        ))
+        let restarted = Daemon::new(
+            Application::new(
+                ConfigRoot::new(root.join("config")),
+                runtime_config,
+                identity,
+            )
+            .unwrap(),
+        )
         .unwrap();
         let inspect_after_restart = restarted
             .handle_request(RequestEnvelope {
@@ -2159,11 +2172,14 @@ mod tests {
                 vec!["gpt-4o-mini"],
             )]);
 
-        let daemon = Daemon::new(Application::new(
-            ConfigRoot::new(root.join("config")),
-            runtime_config,
-            test_identity(&workspace_root),
-        ))
+        let daemon = Daemon::new(
+            Application::new(
+                ConfigRoot::new(root.join("config")),
+                runtime_config,
+                test_identity(&workspace_root),
+            )
+            .unwrap(),
+        )
         .unwrap();
 
         daemon.store.mark_turn_active("session.default").unwrap();
@@ -2198,11 +2214,14 @@ mod tests {
         let workspace_root = root.join("workspace");
         fs::create_dir_all(&workspace_root).unwrap();
 
-        let daemon = Daemon::new(Application::new(
-            ConfigRoot::new(root.join("config")),
-            test_runtime_config(&root, &workspace_root, Some("http://127.0.0.1:1".into())),
-            test_identity(&workspace_root),
-        ))
+        let daemon = Daemon::new(
+            Application::new(
+                ConfigRoot::new(root.join("config")),
+                test_runtime_config(&root, &workspace_root, Some("http://127.0.0.1:1".into())),
+                test_identity(&workspace_root),
+            )
+            .unwrap(),
+        )
         .unwrap();
 
         {
@@ -2387,11 +2406,14 @@ mod tests {
         let workspace_root = root.join("workspace");
         fs::create_dir_all(&workspace_root).unwrap();
 
-        let daemon = Daemon::new(Application::new(
-            ConfigRoot::new(root.join("config")),
-            test_runtime_config(&root, &workspace_root, Some("http://127.0.0.1:1".into())),
-            test_identity(&workspace_root),
-        ))
+        let daemon = Daemon::new(
+            Application::new(
+                ConfigRoot::new(root.join("config")),
+                test_runtime_config(&root, &workspace_root, Some("http://127.0.0.1:1".into())),
+                test_identity(&workspace_root),
+            )
+            .unwrap(),
+        )
         .unwrap();
 
         let session_subscribe = daemon

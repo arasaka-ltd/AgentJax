@@ -28,9 +28,10 @@ pub use node::{Node, NodeKind, NodeStatus, TrustLevel};
 pub use object_meta::ObjectMeta;
 pub use plugin::{
     BillingCapability, ChannelCapability, CommandCapability, ContextCapability, HookCapability,
-    HookPoint, KnowledgeCapability, MemoryCapability, NodeCapability, Permission, PluginCapability,
-    PluginDescriptor, PluginManifest, PluginStatus, ProviderCapability, RagCapability,
-    ResourceDescriptor, SkillCapability, ToolCapability, UiCapability, WorkflowCapability,
+    HookInput, HookPoint, HookRegistration, KnowledgeCapability, MemoryCapability, NodeCapability,
+    Permission, PluginCapability, PluginDescriptor, PluginManifest, PluginStatus,
+    ProviderCapability, RagCapability, ResourceDescriptor, SkillCapability, ToolCapability,
+    UiCapability, WorkflowCapability,
 };
 pub use policies::{
     AutonomyPolicy, BackoffStrategy, BreakerStatus, CircuitBreakerState, ContextAssemblyPurpose,

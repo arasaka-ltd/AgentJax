@@ -174,6 +174,46 @@
 - [x] 保持这条能力是“模型热切换底层基础”，不在本批直接实现 slash 命令解析
 - [x] 为默认模型、session override、重启恢复补最小回归测试
 
+## Batch 3.7: Plugin SDK Alignment
+- [x] 补齐 `PluginContext` 最小版，使其不只是 config/resource 壳，而具备统一 runtime handles 落点：
+  - workspace
+  - session
+  - turn
+  - models
+  - tools
+  - memory
+  - knowledge
+  - events
+  - hooks
+- [x] 将当前 provider / tool / storage 接口对齐到统一 plugin trait 体系：
+  - `ProviderPlugin`
+  - `ToolPlugin`
+  - `SessionStore` / storage plugin
+  - context plugin 最小 trait
+  - backend plugin 最小 trait
+- [x] 强化 `PluginRegistry`：
+  - 按 capability 查询实例
+  - manifest map
+  - provider registry
+  - 最小依赖校验
+  - workspace 可用插件集预留落点
+- [x] 强化 `PluginHost` 生命周期接线：
+  - `on_load`
+  - `on_startup`
+  - `on_shutdown`
+  - 最小错误传播
+- [x] 将 `SqliteSessionStore` 明确提升为 storage plugin 落点，而不只是裸 store 实现
+- [x] 将当前 retrieval/context 相关实现整理为 context plugin 落点，而不是只做内部模块
+- [x] 为 `ResourceRegistry` 预留资源客户端抽象方向：
+  - `ModelClient`
+  - `ToolClient`
+  - `MemoryClient`
+  - `KnowledgeClient`
+  - 先不做完整实现，但钉死接口边界
+- [x] 为 Hook 系统补结构化输入对象基础，而不是只存 `HookPoint`
+- [x] 保持范围收敛在静态注册 + 单 workspace + 单 provider，不进入动态插件加载
+- [x] 为 plugin registry / plugin host / storage plugin / context plugin 补最小回归测试
+
 ## Batch 4: Memory / RAG v0
 - [x] 实现 `MEMORY.md` + `memory/topics/` 的最小读取召回
 - [x] 实现 `knowledge/` 的最小 keyword/full-text 检索

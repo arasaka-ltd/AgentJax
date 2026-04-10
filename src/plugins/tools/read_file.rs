@@ -4,12 +4,31 @@ use serde_json::json;
 use tokio::fs;
 
 use crate::{
+    core::Plugin,
     domain::ToolCall,
+    domain::{Permission, PluginCapability, PluginManifest, ToolCapability},
     plugins::tools::{ToolDescriptor, ToolOutput, ToolPlugin},
 };
 
 #[derive(Debug, Clone, Default)]
 pub struct ReadFileToolPlugin;
+
+#[async_trait]
+impl Plugin for ReadFileToolPlugin {
+    fn manifest(&self) -> PluginManifest {
+        PluginManifest {
+            id: "tool.builtin.read_file".into(),
+            version: "0.1.0".into(),
+            capabilities: vec![PluginCapability::Tool(ToolCapability::Tool)],
+            config_schema: None,
+            required_permissions: vec![Permission::ReadWorkspace],
+            dependencies: Vec::new(),
+            optional_dependencies: Vec::new(),
+            provided_resources: Vec::new(),
+            hooks: Vec::new(),
+        }
+    }
+}
 
 #[async_trait]
 impl ToolPlugin for ReadFileToolPlugin {

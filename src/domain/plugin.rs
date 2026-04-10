@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::domain::ResourceId;
 
@@ -165,6 +166,21 @@ pub enum HookPoint {
     OnTaskSucceeded,
     OnScheduleTick,
     OnArtifactCreated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HookRegistration {
+    pub plugin_id: String,
+    pub point: HookPoint,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HookInput {
+    pub point: HookPoint,
+    pub workspace_id: Option<String>,
+    pub session_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub payload: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -4,8 +4,16 @@ use std::{
 };
 
 use anyhow::Result;
+use async_trait::async_trait;
 
 use crate::config::{WorkspaceDocument, WorkspacePaths};
+use crate::{
+    core::{ContextPlugin, Plugin},
+    domain::{
+        ContextCapability, KnowledgeCapability, MemoryCapability, Permission, PluginCapability,
+        PluginManifest,
+    },
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetrievalCollectionKind {
@@ -120,6 +128,36 @@ impl RetrievalBridgeContextPlugin {
     }
 }
 
+#[async_trait]
+impl Plugin for RetrievalBridgeContextPlugin {
+    fn manifest(&self) -> PluginManifest {
+        PluginManifest {
+            id: "context.workspace.retrieval_bridge".into(),
+            version: "0.1.0".into(),
+            capabilities: vec![
+                PluginCapability::Context(ContextCapability::BlockGenerator),
+                PluginCapability::Memory(MemoryCapability::Recall),
+                PluginCapability::Knowledge(KnowledgeCapability::RetrievalPolicy),
+            ],
+            config_schema: None,
+            required_permissions: vec![Permission::ReadWorkspace],
+            dependencies: Vec::new(),
+            optional_dependencies: Vec::new(),
+            provided_resources: Vec::new(),
+            hooks: Vec::new(),
+        }
+    }
+}
+
+impl ContextPlugin for RetrievalBridgeContextPlugin {
+    fn collections(&self) -> Vec<String> {
+        RetrievalBridgeContextPlugin::collections(self)
+            .into_iter()
+            .map(|collection| collection.collection_id)
+            .collect()
+    }
+}
+
 fn discover_text_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     if !root.exists() {
@@ -198,7 +236,10 @@ mod tests {
     };
 
     use super::{RetrievalBridgeContextPlugin, RetrievalCollectionKind};
-    use crate::config::{WorkspaceDocument, WorkspacePaths};
+    use crate::{
+        config::{WorkspaceDocument, WorkspacePaths},
+        core::{ContextPlugin, Plugin},
+    };
 
     #[test]
     fn distinguishes_memory_recall_from_knowledge_retrieval() {
@@ -238,6 +279,19 @@ mod tests {
             .all(|item| item.kind == RetrievalCollectionKind::Knowledge));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn retrieval_bridge_exposes_context_plugin_manifest_and_collections() {
+        let root = temp_path("retrieval-bridge-plugin");
+        let paths = WorkspacePaths::new(&root);
+        let bridge = RetrievalBridgeContextPlugin::new(&paths);
+
+        assert_eq!(bridge.manifest().id, "context.workspace.retrieval_bridge");
+        assert_eq!(
+            ContextPlugin::collections(&bridge),
+            vec!["memory".to_string(), "knowledge".to_string()]
+        );
     }
 
     fn temp_path(prefix: &str) -> PathBuf {

@@ -3,9 +3,9 @@ use crate::config::ConfigLoader;
 
 pub fn bootstrap_application() -> anyhow::Result<Application> {
     let loaded = ConfigLoader::load_default()?;
-    Ok(Application::new(
+    Application::new(
         loaded.config_root,
         loaded.runtime_config,
         loaded.workspace_identity,
-    ))
+    )
 }

@@ -7,12 +7,34 @@ use tokio::{
 };
 
 use crate::{
+    core::Plugin,
     domain::ToolCall,
+    domain::{Permission, PluginCapability, PluginManifest, ToolCapability},
     plugins::tools::{ToolDescriptor, ToolOutput, ToolPlugin},
 };
 
 #[derive(Debug, Clone, Default)]
 pub struct ShellToolPlugin;
+
+#[async_trait]
+impl Plugin for ShellToolPlugin {
+    fn manifest(&self) -> PluginManifest {
+        PluginManifest {
+            id: "tool.builtin.shell".into(),
+            version: "0.1.0".into(),
+            capabilities: vec![
+                PluginCapability::Tool(ToolCapability::Tool),
+                PluginCapability::Tool(ToolCapability::Executor),
+            ],
+            config_schema: None,
+            required_permissions: vec![Permission::ReadWorkspace, Permission::WriteWorkspace],
+            dependencies: Vec::new(),
+            optional_dependencies: Vec::new(),
+            provided_resources: Vec::new(),
+            hooks: Vec::new(),
+        }
+    }
+}
 
 #[async_trait]
 impl ToolPlugin for ShellToolPlugin {

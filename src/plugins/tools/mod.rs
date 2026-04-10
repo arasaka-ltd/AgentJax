@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::domain::ToolCall;
+use crate::{core::Plugin, domain::ToolCall};
 
 pub mod list_files;
 pub mod read_file;
@@ -33,7 +33,7 @@ pub struct ToolOutput {
 }
 
 #[async_trait]
-pub trait ToolPlugin: Send + Sync {
+pub trait ToolPlugin: Plugin + Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
 
     async fn invoke(&self, call: &ToolCall) -> Result<ToolOutput>;
