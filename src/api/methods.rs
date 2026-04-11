@@ -171,11 +171,14 @@ pub struct ConfigValidateResponse {
     pub ok: bool,
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
+    #[serde(default)]
+    pub migrations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigReloadResponse {
     pub ok: bool,
+    pub disposition: String,
     pub reloaded_modules: Vec<String>,
     pub drained_modules: Vec<String>,
 }

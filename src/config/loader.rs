@@ -1,16 +1,22 @@
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AgentDefinition, ConfigRoot, LlmProviderConfig, ModelCatalogSnapshot, PluginsConfig,
-    RuntimeConfig, RuntimePaths, WorkspaceConfig, WorkspaceDocument, WorkspaceIdentityPack,
-    WorkspacePaths,
+    migrator::ConfigMigrator,
+    normalizer::ConfigNormalizer,
+    snapshot::RuntimeConfigSnapshot,
+    validator::{ConfigValidationReport, ConfigValidator},
+    ConfigRoot, LlmProviderConfig, ModelCatalogSnapshot, RuntimeConfig, WorkspaceConfig,
+    WorkspaceDocument, WorkspaceIdentityPack, WorkspacePaths,
 };
+
+pub const CURRENT_CONFIG_SCHEMA_VERSION: &str = "config.v1";
 
 #[derive(Debug, Clone, Default)]
 pub struct ConfigLoader;
@@ -20,6 +26,7 @@ pub struct LoadedConfig {
     pub config_root: ConfigRoot,
     pub runtime_config: RuntimeConfig,
     pub workspace_identity: WorkspaceIdentityPack,
+    pub config_snapshot: RuntimeConfigSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -31,65 +38,115 @@ pub enum InitMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct CoreTomlConfig {
-    app_name: Option<String>,
-    workspace_id: Option<String>,
-    runtime_root: Option<String>,
-    workspace_root: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProvidersTomlConfig {
-    llm: ProvidersLlmConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProvidersLlmConfig {
-    default_provider_id: String,
-    providers: Vec<LlmProviderConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ModelsTomlConfig {
-    defaults: ModelsDefaultsConfig,
+pub(crate) struct CoreTomlConfig {
     #[serde(default)]
-    snapshot: ModelCatalogSnapshot,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ModelsDefaultsConfig {
-    provider_id: String,
-    model_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ResourcesTomlConfig {
-    resources: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct DaemonTomlConfig {
-    unix_socket: String,
-    websocket_bind: String,
+    pub schema_version: Option<String>,
+    pub app_name: Option<String>,
+    pub workspace_id: Option<String>,
+    pub runtime_root: Option<String>,
+    pub workspace_root: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct PluginsTomlConfig {
+pub(crate) struct ProvidersTomlConfig {
     #[serde(default)]
-    enabled: std::collections::BTreeSet<String>,
+    pub schema_version: Option<String>,
+    pub llm: ProvidersLlmConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ProvidersLlmConfig {
+    pub default_provider_id: String,
+    pub providers: Vec<LlmProviderConfig>,
+}
+
+impl Default for ProvidersLlmConfig {
+    fn default() -> Self {
+        Self {
+            default_provider_id: "openai-default".into(),
+            providers: vec![LlmProviderConfig::OpenAi(Default::default())],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct ModelsTomlConfig {
     #[serde(default)]
-    disabled: std::collections::BTreeSet<String>,
+    pub schema_version: Option<String>,
+    pub defaults: ModelsDefaultsConfig,
     #[serde(default)]
-    config_refs: std::collections::BTreeMap<String, String>,
+    pub snapshot: ModelCatalogSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ModelsDefaultsConfig {
+    pub provider_id: String,
+    pub model_id: String,
+}
+
+impl Default for ModelsDefaultsConfig {
+    fn default() -> Self {
+        Self {
+            provider_id: "openai-default".into(),
+            model_id: "gpt-4o-mini".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct ResourcesTomlConfig {
     #[serde(default)]
-    policy_flags: std::collections::BTreeMap<String, bool>,
+    pub schema_version: Option<String>,
     #[serde(default)]
-    reload_hints: std::collections::BTreeMap<String, String>,
+    pub resources: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct DaemonTomlConfig {
+    #[serde(default)]
+    pub schema_version: Option<String>,
+    pub unix_socket: String,
+    pub websocket_bind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub(crate) struct PluginsTomlConfig {
+    #[serde(default)]
+    pub schema_version: Option<String>,
+    #[serde(default)]
+    pub enabled: BTreeSet<String>,
+    #[serde(default)]
+    pub disabled: BTreeSet<String>,
+    #[serde(default)]
+    pub config_refs: BTreeMap<String, String>,
+    #[serde(default)]
+    pub policy_flags: BTreeMap<String, bool>,
+    #[serde(default)]
+    pub reload_hints: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ParsedConfigBundle {
+    pub config_root: ConfigRoot,
+    pub core: CoreTomlConfig,
+    pub providers: ProvidersTomlConfig,
+    pub models: ModelsTomlConfig,
+    pub resources: ResourcesTomlConfig,
+    pub daemon: DaemonTomlConfig,
+    pub plugins: PluginsTomlConfig,
 }
 
 impl ConfigLoader {
     pub fn load_default() -> Result<LoadedConfig> {
         Self::load_from_roots("./config", "./runtime", "./workspace")
+    }
+
+    pub fn validate_default() -> Result<ConfigValidationReport> {
+        Self::validate_at("./config", "./runtime", "./workspace")
+    }
+
+    pub fn load_snapshot_default() -> Result<RuntimeConfigSnapshot> {
+        Self::load_default().map(|loaded| loaded.config_snapshot)
     }
 
     pub fn initialize_default(mode: InitMode) -> Result<()> {
@@ -108,6 +165,7 @@ impl ConfigLoader {
         let runtime_root = runtime_root.as_ref().to_string_lossy().into_owned();
         let workspace_root = workspace_root.as_ref().to_string_lossy().into_owned();
         let core = CoreTomlConfig {
+            schema_version: Some(CURRENT_CONFIG_SCHEMA_VERSION.into()),
             app_name: Some(match mode {
                 InitMode::Minimal => "agentjax".into(),
                 InitMode::LocalDev => "agentjax-local-dev".into(),
@@ -119,19 +177,21 @@ impl ConfigLoader {
         write_toml_if_missing(&config_root.core_config, &core)?;
 
         let providers = ProvidersTomlConfig {
-            llm: ProvidersLlmConfig {
-                default_provider_id: "openai-default".into(),
-                providers: vec![LlmProviderConfig::OpenAi(Default::default())],
-            },
+            schema_version: Some(CURRENT_CONFIG_SCHEMA_VERSION.into()),
+            llm: ProvidersLlmConfig::default(),
         };
         write_toml_if_missing(&config_root.providers_config, &providers)?;
-        write_toml_if_missing(&config_root.plugins_config, &PluginsTomlConfig::default())?;
+        write_toml_if_missing(
+            &config_root.plugins_config,
+            &PluginsTomlConfig {
+                schema_version: Some(CURRENT_CONFIG_SCHEMA_VERSION.into()),
+                ..PluginsTomlConfig::default()
+            },
+        )?;
 
         let models = ModelsTomlConfig {
-            defaults: ModelsDefaultsConfig {
-                provider_id: "openai-default".into(),
-                model_id: "gpt-4o-mini".into(),
-            },
+            schema_version: Some(CURRENT_CONFIG_SCHEMA_VERSION.into()),
+            defaults: ModelsDefaultsConfig::default(),
             snapshot: ModelCatalogSnapshot::default(),
         };
         write_toml_if_missing(&config_root.models_config, &models)?;
@@ -139,12 +199,14 @@ impl ConfigLoader {
         write_toml_if_missing(
             &config_root.resources_config,
             &ResourcesTomlConfig {
+                schema_version: Some(CURRENT_CONFIG_SCHEMA_VERSION.into()),
                 resources: Vec::new(),
             },
         )?;
         write_toml_if_missing(
             &config_root.daemon_config,
             &DaemonTomlConfig {
+                schema_version: Some(CURRENT_CONFIG_SCHEMA_VERSION.into()),
                 unix_socket: PathBuf::from(&runtime_root)
                     .join("run")
                     .join("daemon.sock")
@@ -160,66 +222,61 @@ impl ConfigLoader {
         Ok(())
     }
 
+    pub fn validate_at(
+        config_root: impl AsRef<Path>,
+        runtime_root: impl AsRef<Path>,
+        workspace_root: impl AsRef<Path>,
+    ) -> Result<ConfigValidationReport> {
+        let parsed = Self::parse_at(
+            config_root.as_ref(),
+            runtime_root.as_ref(),
+            workspace_root.as_ref(),
+        )?;
+        let (migrated, migration) = ConfigMigrator::migrate(parsed);
+        let mut report = ConfigValidator::validate(&migrated)?;
+        report.warnings.extend(migration.warnings);
+        report.migrations = migration.steps;
+        report.ok = report.errors.is_empty();
+        Ok(report)
+    }
+
     pub fn load_from_roots(
         config_root: impl AsRef<Path>,
         runtime_root: impl AsRef<Path>,
         workspace_root: impl AsRef<Path>,
     ) -> Result<LoadedConfig> {
-        Self::initialize_at(
+        let parsed = Self::parse_at(
             config_root.as_ref(),
             runtime_root.as_ref(),
             workspace_root.as_ref(),
-            InitMode::Minimal,
+        )?;
+        let (migrated, migration) = ConfigMigrator::migrate(parsed);
+        let validation = ConfigValidator::validate(&migrated)?;
+        if !validation.ok {
+            return Err(anyhow!(
+                "config validation failed: {}",
+                validation.errors.join("; ")
+            ));
+        }
+
+        let normalized = ConfigNormalizer::normalize(migrated)?;
+        let workspace_identity =
+            Self::load_workspace_identity(&normalized.runtime_config.workspace)?;
+        let config_snapshot = RuntimeConfigSnapshot::build(
+            normalized.schema_version.clone(),
+            normalized.runtime_config.clone(),
+            normalized.daemon.clone(),
         )?;
 
-        let config_root = ConfigRoot::new(config_root.as_ref());
-        let core: CoreTomlConfig = toml::from_str(&fs::read_to_string(&config_root.core_config)?)?;
-        let providers: ProvidersTomlConfig =
-            toml::from_str(&fs::read_to_string(&config_root.providers_config)?)?;
-        let plugins: PluginsTomlConfig =
-            toml::from_str(&fs::read_to_string(&config_root.plugins_config)?)?;
-        let models: ModelsTomlConfig =
-            toml::from_str(&fs::read_to_string(&config_root.models_config)?)?;
-
-        let runtime_root = core
-            .runtime_root
-            .unwrap_or_else(|| runtime_root.as_ref().to_string_lossy().into_owned());
-        let workspace_root = core
-            .workspace_root
-            .unwrap_or_else(|| workspace_root.as_ref().to_string_lossy().into_owned());
-        let workspace = WorkspaceConfig::new(
-            core.workspace_id
-                .unwrap_or_else(|| "default-workspace".into()),
-            WorkspacePaths::new(workspace_root),
-        );
-        workspace.ensure_workspace_layout()?;
-
-        let workspace_identity = Self::load_workspace_identity(&workspace)?;
-        let mut runtime_config = RuntimeConfig::new(
-            core.app_name.unwrap_or_else(|| "agentjax".into()),
-            RuntimePaths::new(runtime_root),
-            workspace,
-        );
-        runtime_config.agent_runtime.default_agent = AgentDefinition {
-            provider_id: models.defaults.provider_id.clone(),
-            model: models.defaults.model_id.clone(),
-            ..runtime_config.agent_runtime.default_agent
-        };
-        runtime_config.plugins = PluginsConfig {
-            enabled: plugins.enabled,
-            disabled: plugins.disabled,
-            config_refs: plugins.config_refs,
-            policy_flags: plugins.policy_flags,
-            reload_hints: plugins.reload_hints,
-        };
-        runtime_config.agent_runtime.llm.default_provider_id = providers.llm.default_provider_id;
-        runtime_config.agent_runtime.llm.providers = providers.llm.providers;
-        runtime_config.agent_runtime.llm.model_catalog = models.snapshot;
+        if !migration.warnings.is_empty() {
+            let _ = migration;
+        }
 
         Ok(LoadedConfig {
-            config_root,
-            runtime_config,
+            config_root: normalized.config_root,
+            runtime_config: normalized.runtime_config,
             workspace_identity,
+            config_snapshot,
         })
     }
 
@@ -245,10 +302,8 @@ impl ConfigLoader {
             toml::from_str(&fs::read_to_string(&config_root.models_config)?)?
         } else {
             ModelsTomlConfig {
-                defaults: ModelsDefaultsConfig {
-                    provider_id: "openai-default".into(),
-                    model_id: "gpt-4o-mini".into(),
-                },
+                schema_version: Some(CURRENT_CONFIG_SCHEMA_VERSION.into()),
+                defaults: ModelsDefaultsConfig::default(),
                 snapshot: ModelCatalogSnapshot::default(),
             }
         };
@@ -266,6 +321,9 @@ impl ConfigLoader {
         }
 
         let config = ModelsTomlConfig {
+            schema_version: existing
+                .schema_version
+                .or_else(|| Some(CURRENT_CONFIG_SCHEMA_VERSION.into())),
             defaults: existing.defaults,
             snapshot: ModelCatalogSnapshot {
                 generated_at: snapshot.generated_at,
@@ -274,6 +332,25 @@ impl ConfigLoader {
         };
         fs::write(&config_root.models_config, toml::to_string_pretty(&config)?)?;
         Ok(())
+    }
+
+    fn parse_at(
+        config_root: &Path,
+        runtime_root: &Path,
+        workspace_root: &Path,
+    ) -> Result<ParsedConfigBundle> {
+        Self::initialize_at(config_root, runtime_root, workspace_root, InitMode::Minimal)?;
+
+        let config_root = ConfigRoot::new(config_root);
+        Ok(ParsedConfigBundle {
+            core: toml::from_str(&fs::read_to_string(&config_root.core_config)?)?,
+            providers: toml::from_str(&fs::read_to_string(&config_root.providers_config)?)?,
+            plugins: toml::from_str(&fs::read_to_string(&config_root.plugins_config)?)?,
+            models: toml::from_str(&fs::read_to_string(&config_root.models_config)?)?,
+            resources: toml::from_str(&fs::read_to_string(&config_root.resources_config)?)?,
+            daemon: toml::from_str(&fs::read_to_string(&config_root.daemon_config)?)?,
+            config_root,
+        })
     }
 
     fn read_document(path: &Path) -> Result<WorkspaceDocument> {
@@ -432,6 +509,7 @@ mod tests {
             .exists());
         assert!(loaded.runtime_config.workspace.paths.knowledge_dir.exists());
         assert!(loaded.runtime_config.workspace.paths.prompts_dir.exists());
+        assert!(!loaded.config_snapshot.metadata.fingerprint.is_empty());
 
         let _ = fs::remove_dir_all(root);
     }

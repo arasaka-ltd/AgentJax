@@ -64,6 +64,7 @@ impl DaemonStore {
             persistence,
             tasks,
         };
+        store.reseed_identity_counters()?;
         store.ensure_default_session()?;
         Ok(store)
     }
@@ -281,6 +282,85 @@ impl DaemonStore {
         }
         Ok(())
     }
+
+    fn reseed_identity_counters(&self) -> Result<()> {
+        let sessions = self.persistence.list_sessions()?;
+        let tasks = self.tasks.list()?;
+
+        let mut next_message = 1_u64;
+        let mut next_turn = 1_u64;
+        let mut next_event = 1_u64;
+        let mut next_task = 1_u64;
+        let mut next_checkpoint = 1_u64;
+
+        for record in &sessions {
+            if let Some(last_turn_id) = record.session.last_turn_id.as_deref() {
+                next_turn = next_turn.max(next_counter_value(last_turn_id, "turn_"));
+            }
+
+            for message in &record.messages {
+                if let Some(message_id) = message.meta.message_id.as_deref() {
+                    next_message = next_message.max(next_counter_value(message_id, "msg_"));
+                }
+            }
+
+            for event in &record.events {
+                next_event = next_event.max(next_counter_value(&event.event_id, "evt_"));
+                if let Some(turn_id) = event.turn_id.as_deref() {
+                    next_turn = next_turn.max(next_counter_value(turn_id, "turn_"));
+                }
+            }
+        }
+
+        for record in &tasks {
+            next_task = next_task.max(next_counter_value(&record.task.task_id, "task_"));
+            if let Some(checkpoint_id) = record.task.checkpoint_ref.as_deref() {
+                next_checkpoint =
+                    next_checkpoint.max(next_counter_value(checkpoint_id, "checkpoint_"));
+            }
+            for timeline in &record.timeline {
+                if let Some(turn_id) = timeline.turn_id.as_deref() {
+                    next_turn = next_turn.max(next_counter_value(turn_id, "turn_"));
+                }
+                if let Some(event_id) = timeline.event_id.as_deref() {
+                    next_event = next_event.max(next_counter_value(event_id, "evt_"));
+                }
+            }
+            for checkpoint in &record.checkpoints {
+                next_checkpoint = next_checkpoint
+                    .max(next_counter_value(&checkpoint.checkpoint_id, "checkpoint_"));
+                if let Some(turn_id) = checkpoint.turn_id.as_deref() {
+                    next_turn = next_turn.max(next_counter_value(turn_id, "turn_"));
+                }
+            }
+        }
+
+        self.next_message.store(next_message, Ordering::Relaxed);
+        self.next_turn.store(next_turn, Ordering::Relaxed);
+        self.next_event.store(next_event, Ordering::Relaxed);
+        self.next_task.store(next_task, Ordering::Relaxed);
+        self.next_checkpoint
+            .store(next_checkpoint, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+fn next_counter_value(id: &str, prefix: &str) -> u64 {
+    id.strip_prefix(prefix)
+        .map(|suffix| {
+            suffix
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect::<String>()
+        })
+        .and_then(|digits| {
+            if digits.is_empty() {
+                None
+            } else {
+                digits.parse::<u64>().ok()
+            }
+        })
+        .map_or(1, |value| value.saturating_add(1))
 }
 
 #[derive(Clone)]
@@ -360,5 +440,24 @@ fn default_session(runtime_config: &RuntimeConfig) -> Session {
         current_model_id: Some(runtime_config.agent_runtime.default_agent.model.clone()),
         pending_model_switch: None,
         last_model_switched_at: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_counter_value;
+
+    #[test]
+    fn next_counter_value_advances_numeric_suffixes() {
+        assert_eq!(next_counter_value("msg_9", "msg_"), 10);
+        assert_eq!(next_counter_value("msg_12.runtime", "msg_"), 13);
+        assert_eq!(next_counter_value("turn_42_extra", "turn_"), 43);
+    }
+
+    #[test]
+    fn next_counter_value_ignores_non_matching_ids() {
+        assert_eq!(next_counter_value("manual-id", "msg_"), 1);
+        assert_eq!(next_counter_value("msg_", "msg_"), 1);
+        assert_eq!(next_counter_value("checkpoint_restart", "checkpoint_"), 1);
     }
 }

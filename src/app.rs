@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::builtin::tools::ToolRegistry;
-use crate::config::{ConfigRoot, RuntimeConfig, WorkspaceIdentityPack};
+use crate::config::{ConfigRoot, RuntimeConfig, RuntimeConfigSnapshot, WorkspaceIdentityPack};
 use crate::context_engine::{ContextEngine, WorkspaceContextEngine};
 use crate::core::{
     ApplicationRuntime, EventBus, HookBus, PluginHost, PluginManager, PluginManagerCandidate,
@@ -18,6 +18,7 @@ use crate::plugins::{
 #[derive(Clone)]
 pub struct Application {
     pub config_root: ConfigRoot,
+    pub config_snapshot: RuntimeConfigSnapshot,
     pub runtime_config: RuntimeConfig,
     pub workspace_identity: WorkspaceIdentityPack,
     pub plugin_host: PluginHost,
@@ -35,6 +36,33 @@ pub struct Application {
 impl Application {
     pub fn new(
         config_root: ConfigRoot,
+        runtime_config: RuntimeConfig,
+        workspace_identity: WorkspaceIdentityPack,
+    ) -> Result<Self> {
+        let config_snapshot = RuntimeConfigSnapshot::build(
+            runtime_config.config_schema_version.clone(),
+            runtime_config.clone(),
+            crate::config::DaemonConfigSnapshot {
+                schema_version: runtime_config.config_schema_version.clone(),
+                unix_socket: runtime_config
+                    .runtime_paths
+                    .daemon_socket
+                    .display()
+                    .to_string(),
+                websocket_bind: "127.0.0.1:4080".into(),
+            },
+        )?;
+        Self::new_with_snapshot(
+            config_root,
+            config_snapshot,
+            runtime_config,
+            workspace_identity,
+        )
+    }
+
+    pub fn new_with_snapshot(
+        config_root: ConfigRoot,
+        config_snapshot: RuntimeConfigSnapshot,
         runtime_config: RuntimeConfig,
         workspace_identity: WorkspaceIdentityPack,
     ) -> Result<Self> {
@@ -77,6 +105,7 @@ impl Application {
 
         Ok(Self {
             config_root,
+            config_snapshot,
             runtime_config,
             workspace_identity: workspace_identity.clone(),
             plugin_host,

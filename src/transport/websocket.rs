@@ -115,7 +115,7 @@ async fn write_server_message(
     envelope: &ServerEnvelope,
 ) -> Result<()> {
     socket
-        .send(Message::Text(serde_json::to_string(envelope)?.into()))
+        .send(Message::Text(serde_json::to_string(envelope)?))
         .await?;
     Ok(())
 }

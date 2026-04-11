@@ -427,9 +427,16 @@ fn compact_excerpt(content: &str, query: &str) -> String {
     let normalized_query = query.to_lowercase();
     let normalized_content = trimmed.to_lowercase();
     if let Some(index) = normalized_content.find(&normalized_query) {
-        let start = index.saturating_sub(80);
-        let end = (index + normalized_query.len() + 160).min(trimmed.len());
-        return trimmed[start..end].trim().to_string();
+        let prefix_chars = normalized_content[..index].chars().count();
+        let match_chars = normalized_query.chars().count();
+        let start_char = prefix_chars.saturating_sub(80);
+        let end_char = (prefix_chars + match_chars + 160).min(trimmed.chars().count());
+        let excerpt = trimmed
+            .chars()
+            .skip(start_char)
+            .take(end_char.saturating_sub(start_char))
+            .collect::<String>();
+        return excerpt.trim().to_string();
     }
 
     trimmed.lines().take(8).collect::<Vec<_>>().join("\n")

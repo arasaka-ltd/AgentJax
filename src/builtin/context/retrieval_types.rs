@@ -1,17 +1,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum RetrievalScope {
     Disabled,
+    #[default]
     Implicit,
     ExplicitOnly,
-}
-
-impl Default for RetrievalScope {
-    fn default() -> Self {
-        Self::Implicit
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -22,7 +17,7 @@ pub enum RetrievalMode {
 }
 
 impl RetrievalMode {
-    pub fn from_str(value: &str) -> Self {
+    pub fn parse(value: &str) -> Self {
         match value {
             "semantic" => Self::Semantic,
             "hybrid" => Self::Hybrid,
@@ -41,7 +36,7 @@ pub enum MemorySearchScope {
 }
 
 impl MemorySearchScope {
-    pub fn from_str(value: &str) -> Self {
+    pub fn parse(value: &str) -> Self {
         match value {
             "memory_md" => Self::MemoryMd,
             "topics" => Self::Topics,

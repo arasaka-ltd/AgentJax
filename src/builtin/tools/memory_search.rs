@@ -71,13 +71,13 @@ impl ToolPlugin for MemorySearchToolPlugin {
             .get("top_k")
             .and_then(|value| value.as_u64())
             .unwrap_or(5) as usize;
-        let scope = MemorySearchScope::from_str(
+        let scope = MemorySearchScope::parse(
             call.args
                 .get("scope")
                 .and_then(|value| value.as_str())
                 .unwrap_or("all"),
         );
-        let mode = RetrievalMode::from_str(
+        let mode = RetrievalMode::parse(
             call.args
                 .get("mode")
                 .and_then(|value| value.as_str())

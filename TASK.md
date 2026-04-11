@@ -428,43 +428,43 @@
 - `docs/CONFIG_MANAGER_SPEC.md`
 - `/Users/jaxlocke/rig-docs/pages/docs/integrations.mdx`
 
-- [ ] 明确 AgentJax 与 Rig 的职责分层，避免重复实现 Rig 已覆盖的层：
+- [x] 明确 AgentJax 与 Rig 的职责分层，避免重复实现 Rig 已覆盖的层：
   - Rig 负责 provider / completion / embedding / vector store 抽象
   - AgentJax 负责 workspace / daemon / plugin runtime / task runtime / context engine / policy
   - 不把 AgentJax 的 plugin manager 退化成 Rig provider 封装的重复壳
 
-- [ ] 让 `PluginManager` 真正消费 `plugins.toml` 的完整语义：
+- [x] 让 `PluginManager` 真正消费 `plugins.toml` 的完整语义：
   - enabled
   - disabled
   - config refs
   - policy flags
   - reload hints
-- [ ] 为 plugin runtime state 建立更真实的状态机与错误传播
-- [ ] 让 plugin lifecycle 真正接线：
+- [x] 为 plugin runtime state 建立更真实的状态机与错误传播
+- [x] 让 plugin lifecycle 真正接线：
   - `on_load`
   - `on_startup`
   - `on_shutdown`
-- [ ] 增加 plugin health / failure / dependency diagnostics
-- [ ] 为 daemon `plugin.inspect` 补真实内容：
+- [x] 增加 plugin health / failure / dependency diagnostics
+- [x] 为 daemon `plugin.inspect` 补真实内容：
   - status
   - dependencies
   - config ref
   - health
-- [ ] 为 `plugin.reload` 接入真实 reload / drain plan，而不是仅做状态翻转
-- [ ] 清理 Plugin SDK 文档与代码漂移
+- [x] 为 `plugin.reload` 接入真实 reload / drain plan，而不是仅做状态翻转
+- [x] 清理 Plugin SDK 文档与代码漂移
 
 ## Batch 12: Config Manager + Reload Deepening
 执行前先读：
 - `docs/CONFIG_MANAGER_SPEC.md`
 - `docs/WORKSPACE_AND_CONFIG_SPEC.md`
 
-- [ ] 为 config loader 增加 validator / normalizer 层
-- [ ] 增加 config snapshot 概念与模块子快照
-- [ ] 增加 config diff / reload plan 生成
-- [ ] 将当前 `src/core/reload.rs` 从壳扩成真实 reload plan 模型
-- [ ] 让 `config.reload` 返回真实 affected modules / drain plan
-- [ ] 为 plugin enable/disable 变更接入 `DrainAndSwap` 语义
-- [ ] 为配置迁移、schema 校验、fragment 引用补回归测试
+- [x] 为 config loader 增加 validator / normalizer 层
+- [x] 增加 config snapshot 概念与模块子快照
+- [x] 增加 config diff / reload plan 生成
+- [x] 将当前 `src/core/reload.rs` 从壳扩成真实 reload plan 模型
+- [x] 让 `config.reload` 返回真实 affected modules / drain plan
+- [x] 为 plugin enable/disable 变更接入 `DrainAndSwap` 语义
+- [x] 为配置迁移、schema 校验、fragment 引用补回归测试
 
 ## Batch 13: LCM / Context Engine Deepening
 执行前先读：

@@ -95,7 +95,7 @@ enum TuiUpdate {
     Error {
         message: String,
     },
-    Finished(Result<SessionGetResponse, String>),
+    Finished(Box<Result<SessionGetResponse, String>>),
 }
 
 impl TuiApp {
@@ -260,7 +260,9 @@ impl TuiApp {
                         let _ = tx.send(TuiUpdate::Error {
                             message: "missing response result".into(),
                         });
-                        let _ = tx.send(TuiUpdate::Finished(Err("missing response result".into())));
+                        let _ = tx.send(TuiUpdate::Finished(Box::new(Err(
+                            "missing response result".into(),
+                        ))));
                         return;
                     };
 
@@ -272,10 +274,12 @@ impl TuiApp {
                             });
                             match fetch_session(unix_socket, session_id).await {
                                 Ok(session) => {
-                                    let _ = tx.send(TuiUpdate::Finished(Ok(session)));
+                                    let _ = tx.send(TuiUpdate::Finished(Box::new(Ok(session))));
                                 }
                                 Err(error) => {
-                                    let _ = tx.send(TuiUpdate::Finished(Err(error.to_string())));
+                                    let _ = tx.send(TuiUpdate::Finished(Box::new(Err(
+                                        error.to_string(),
+                                    ))));
                                 }
                             }
                         }
@@ -283,7 +287,9 @@ impl TuiApp {
                             let _ = tx.send(TuiUpdate::Error {
                                 message: format!("invalid send response: {error}"),
                             });
-                            let _ = tx.send(TuiUpdate::Finished(Err(error.to_string())));
+                            let _ = tx.send(TuiUpdate::Finished(Box::new(Err(
+                                error.to_string(),
+                            ))));
                         }
                     }
                 }
@@ -295,14 +301,14 @@ impl TuiApp {
                     let _ = tx.send(TuiUpdate::Error {
                         message: message.clone(),
                     });
-                    let _ = tx.send(TuiUpdate::Finished(Err(message)));
+                    let _ = tx.send(TuiUpdate::Finished(Box::new(Err(message))));
                 }
                 Err(error) => {
                     let message = error.to_string();
                     let _ = tx.send(TuiUpdate::Error {
                         message: message.clone(),
                     });
-                    let _ = tx.send(TuiUpdate::Finished(Err(message)));
+                    let _ = tx.send(TuiUpdate::Finished(Box::new(Err(message))));
                 }
             }
         });
@@ -373,7 +379,7 @@ impl TuiApp {
             TuiUpdate::Finished(result) => {
                 self.send_in_flight = false;
                 self.stream_rx = None;
-                match result {
+                match *result {
                     Ok(session) => {
                         self.session = session;
                         self.sessions = fetch_sessions(self.unix_socket.clone()).await?;

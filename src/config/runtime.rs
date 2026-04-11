@@ -43,19 +43,10 @@ impl RuntimeConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct AgentRuntimeConfig {
     pub default_agent: AgentDefinition,
     pub llm: LlmRuntimeConfig,
-}
-
-impl Default for AgentRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            default_agent: AgentDefinition::default(),
-            llm: LlmRuntimeConfig::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

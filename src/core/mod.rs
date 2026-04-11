@@ -22,7 +22,7 @@ pub use plugin_manager::{
     PluginActionReport, PluginManager, PluginManagerCandidate, PluginRuntimeSnapshot,
 };
 pub use registry::PluginRegistry;
-pub use reload::{ReloadInstruction, ReloadPlan};
+pub use reload::{DrainDirective, ReloadDisposition, ReloadInstruction, ReloadPlan};
 pub use resource_registry::ResourceRegistry;
 pub use runtime::{AgentPromptRequest, ApplicationRuntime, RuntimeHost};
 pub use workspace_runtime::{WorkspaceRuntime, WorkspaceRuntimeHost};

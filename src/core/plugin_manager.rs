@@ -145,6 +145,7 @@ impl PluginManager {
         state.discovered.insert(plugin_id, candidate);
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         &self,
         registry: &mut PluginRegistry,
@@ -251,6 +252,7 @@ impl PluginManager {
             .collect()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn reload(
         &self,
         plugin_id: &str,
@@ -668,10 +670,26 @@ fn visit_plugin(
 
 fn run_async<F>(future: F) -> Result<()>
 where
-    F: std::future::Future<Output = Result<()>>,
+    F: std::future::Future<Output = Result<()>> + Send + 'static,
 {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        tokio::task::block_in_place(|| handle.block_on(future))
+        match handle.runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(|| handle.block_on(future))
+            }
+            tokio::runtime::RuntimeFlavor::CurrentThread => std::thread::spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?
+                    .block_on(future)
+            })
+            .join()
+            .map_err(|_| anyhow!("plugin lifecycle thread panicked"))?,
+            _ => tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(future),
+        }
     } else {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()

@@ -277,22 +277,23 @@ fn extract_output_text(payload: OpenAiResponsesApiResponse) -> Result<String> {
 
 fn collapse_repeated_text(text: String) -> String {
     let trimmed = text.trim().to_string();
-    let len = trimmed.len();
+    let chars: Vec<char> = trimmed.chars().collect();
+    let len = chars.len();
     if len < 2 {
         return trimmed;
     }
 
     for unit_len in 1..=(len / 2) {
-        if len % unit_len != 0 {
+        if !len.is_multiple_of(unit_len) {
             continue;
         }
         let repeats = len / unit_len;
         if repeats < 2 {
             continue;
         }
-        let unit = &trimmed[..unit_len];
+        let unit = chars[..unit_len].iter().collect::<String>();
         if unit.repeat(repeats) == trimmed {
-            return unit.to_string();
+            return unit;
         }
     }
 
@@ -587,6 +588,15 @@ mod tests {
             "TOOL_CALL {\"tool\":\"read\"}"
         );
         assert_eq!(collapse_repeated_text("unique text".into()), "unique text");
+    }
+
+    #[test]
+    fn collapses_exact_repeated_output_text_with_multibyte_characters() {
+        assert_eq!(collapse_repeated_text("你你你".into()), "你");
+        assert_eq!(
+            collapse_repeated_text("你好世界你好世界".into()),
+            "你好世界"
+        );
     }
 
     async fn spawn_server(

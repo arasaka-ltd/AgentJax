@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AutonomyPolicy {
     pub may_send_messages: bool,
     pub may_spend_budget: bool,
@@ -10,21 +10,6 @@ pub struct AutonomyPolicy {
     pub may_modify_memory: bool,
     pub may_modify_rules: bool,
     pub may_modify_mission: bool,
-}
-
-impl Default for AutonomyPolicy {
-    fn default() -> Self {
-        Self {
-            may_send_messages: false,
-            may_spend_budget: false,
-            may_create_tasks: false,
-            may_install_plugins: false,
-            may_modify_config: false,
-            may_modify_memory: false,
-            may_modify_rules: false,
-            may_modify_mission: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

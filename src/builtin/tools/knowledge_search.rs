@@ -81,7 +81,7 @@ impl ToolPlugin for KnowledgeSearchToolPlugin {
                     .filter_map(|item| item.as_str().map(str::to_string))
                     .collect()
             })
-            .unwrap_or_else(Vec::new);
+            .unwrap_or_default();
         let results = bridge.search_knowledge(&KnowledgeSearchRequest {
             query: call
                 .args
@@ -105,7 +105,7 @@ impl ToolPlugin for KnowledgeSearchToolPlugin {
                 .get("path_prefix")
                 .and_then(|value| value.as_str())
                 .map(str::to_string),
-            mode: RetrievalMode::from_str(
+            mode: RetrievalMode::parse(
                 call.args
                     .get("mode")
                     .and_then(|value| value.as_str())

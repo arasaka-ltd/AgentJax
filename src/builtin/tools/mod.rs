@@ -68,13 +68,13 @@ impl ToolRegistry {
 
     pub fn builtins() -> Self {
         let mut registry = Self::default();
-        registry.register(Arc::new(ReadToolPlugin::default()));
-        registry.register(Arc::new(EditToolPlugin::default()));
-        registry.register(Arc::new(WriteToolPlugin::default()));
-        registry.register(Arc::new(MemorySearchToolPlugin::default()));
-        registry.register(Arc::new(MemoryGetToolPlugin::default()));
-        registry.register(Arc::new(KnowledgeSearchToolPlugin::default()));
-        registry.register(Arc::new(KnowledgeGetToolPlugin::default()));
+        registry.register(Arc::new(ReadToolPlugin));
+        registry.register(Arc::new(EditToolPlugin));
+        registry.register(Arc::new(WriteToolPlugin));
+        registry.register(Arc::new(MemorySearchToolPlugin));
+        registry.register(Arc::new(MemoryGetToolPlugin));
+        registry.register(Arc::new(KnowledgeSearchToolPlugin));
+        registry.register(Arc::new(KnowledgeGetToolPlugin));
         registry
     }
 }

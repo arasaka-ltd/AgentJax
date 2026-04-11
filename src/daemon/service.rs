@@ -457,11 +457,28 @@ impl Daemon {
     }
 
     fn handle_config_validate(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let report = crate::config::ConfigLoader::validate_at(
+            &self.app.config_root.root,
+            &self.app.runtime_config.runtime_paths.root,
+            &self.app.runtime_config.workspace.paths.root,
+        )
+        .map_err(|error| {
+            ApiError::new(
+                ApiErrorCode::InternalError,
+                format!("config validation failed to execute: {error}"),
+                false,
+            )
+        })?;
         Ok((
             self.serialize(ConfigValidateResponse {
-                ok: true,
-                errors: Vec::new(),
-                warnings: Vec::new(),
+                ok: report.ok,
+                errors: report.errors,
+                warnings: report.warnings,
+                migrations: report
+                    .migrations
+                    .into_iter()
+                    .map(|step| format!("{}: {}", step.file, step.summary))
+                    .collect(),
             })?,
             Vec::new(),
         ))
@@ -469,16 +486,37 @@ impl Daemon {
 
     fn handle_config_reload(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
         self.push_log("config reload requested");
+        let candidate = crate::config::ConfigLoader::load_from_roots(
+            &self.app.config_root.root,
+            &self.app.runtime_config.runtime_paths.root,
+            &self.app.runtime_config.workspace.paths.root,
+        )
+        .map(|loaded| loaded.config_snapshot)
+        .map_err(|error| {
+            ApiError::new(
+                ApiErrorCode::InternalError,
+                format!("config reload failed to load candidate snapshot: {error}"),
+                false,
+            )
+        })?;
+        let diff = self.app.config_snapshot.diff(&candidate).map_err(|error| {
+            ApiError::new(
+                ApiErrorCode::InternalError,
+                format!("config reload diff failed: {error}"),
+                false,
+            )
+        })?;
         Ok((
             self.serialize(ConfigReloadResponse {
-                ok: true,
-                reloaded_modules: vec![
-                    "runtime".into(),
-                    "providers".into(),
-                    "workspace".into(),
-                    "plugins".into(),
-                ],
-                drained_modules: Vec::new(),
+                ok: !diff.reload_plan.restart_required,
+                disposition: format!("{:?}", diff.reload_plan.disposition),
+                reloaded_modules: diff.reload_plan.affected_modules,
+                drained_modules: diff
+                    .reload_plan
+                    .drained_modules
+                    .into_iter()
+                    .map(|drain| drain.module)
+                    .collect(),
             })?,
             Vec::new(),
         ))
