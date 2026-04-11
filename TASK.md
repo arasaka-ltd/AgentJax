@@ -234,18 +234,18 @@
 - [x] 实现 `stream.cancel`
 
 ## Batch 6: Task Runtime v0
-- [ ] 实现最小 task store
-- [ ] 让 `session.send` 可生成 task 或 turn timeline
-- [ ] 实现最小 task status transition
-- [ ] 实现 task inspect / cancel / retry 的最小闭环
-- [ ] 为 checkpoint / resume 留出最小数据模型落点
+- [x] 实现最小 task store
+- [x] 让 `session.send` 可生成 task 或 turn timeline
+- [x] 实现最小 task status transition
+- [x] 实现 task inspect / cancel / retry 的最小闭环
+- [x] 为 checkpoint / resume 留出最小数据模型落点
 
 ## Batch 7: Cleanup + Hardening
-- [ ] 清理 docs 与代码的漂移项
-- [ ] 清理空壳插件与未接线 trait
-- [ ] 为 daemon / cli / transport 增加最小集成测试
-- [ ] 为 workspace loader / context assembly / tool loop 增加回归测试
-- [ ] 补一版真实的开发与运行说明
+- [x] 清理 docs 与代码的漂移项
+- [x] 清理空壳插件与未接线 trait
+- [x] 为 daemon / cli / transport 增加最小集成测试
+- [x] 为 workspace loader / context assembly / tool loop 增加回归测试
+- [x] 补一版真实的开发与运行说明
 
 ---
 ## 明确不优先做

@@ -43,7 +43,7 @@ pub use schedule::{Schedule, TaskTarget, TaskTrigger};
 pub use session::{Session, SessionMode, SessionModelTarget, SessionStatus};
 pub use skill::{Skill, SkillTrigger};
 pub use summary::{InvalidationStatus, ResumePack, SummaryNode, SummaryStatus, SummaryType};
-pub use task::{Task, TaskPhase, TaskPriority, TaskStatus};
+pub use task::{Task, TaskCheckpoint, TaskPhase, TaskPriority, TaskStatus, TaskTimelineEntry};
 pub use tool::{ToolCall, ToolCaller};
 pub use turn::{Turn, TurnPhase, TurnStatus, TurnSummary};
 pub use usage::{UsageCategory, UsageRecord};

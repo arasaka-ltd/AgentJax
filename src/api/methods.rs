@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use crate::api::{StreamId, SubscriptionId};
 use crate::domain::{
     Agent, AgentStatus, Node, NodeStatus, PluginDescriptor, Schedule, Session, SessionModelTarget,
-    SessionStatus, Task, TaskStatus,
+    SessionStatus, Task, TaskCheckpoint, TaskStatus, TaskTimelineEntry,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -489,6 +489,10 @@ pub struct TaskGetRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskGetResponse {
     pub task: Task,
+    #[serde(default)]
+    pub timeline: Vec<TaskTimelineEntry>,
+    #[serde(default)]
+    pub checkpoints: Vec<TaskCheckpoint>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

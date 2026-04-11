@@ -419,6 +419,41 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn build_resume_pack_preserves_workspace_session_and_task_refs() {
+        let root = temp_path("resume-pack");
+        let paths = WorkspacePaths::new(&root);
+        fs::create_dir_all(&paths.root).unwrap();
+
+        let engine = WorkspaceContextEngine::new(
+            WorkspaceIdentityPack {
+                workspace_id: "ws-test".into(),
+                agent: doc("AGENT.md", "agent identity"),
+                soul: doc("SOUL.md", "calm and direct"),
+                user: doc("USER.md", "prefers concise answers"),
+                memory: doc("MEMORY.md", "Stable fact: Project Alpha prefers Rust."),
+                mission: doc("MISSION.md", "ship useful agents"),
+                rules: doc("RULES.md", "do not guess"),
+                router: doc("ROUTER.md", "use memory when relevant"),
+            },
+            paths,
+        );
+
+        let resume = engine
+            .build_resume_pack(Some("session.default"), Some("task_42"))
+            .expect("build resume pack");
+
+        assert_eq!(resume.workspace_id.as_deref(), Some("ws-test"));
+        assert_eq!(resume.session_id.as_deref(), Some("session.default"));
+        assert_eq!(resume.task_id.as_deref(), Some("task_42"));
+        assert!(resume
+            .mission_ref
+            .as_deref()
+            .is_some_and(|path| path.ends_with("MISSION.md")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn doc(path: &str, content: &str) -> WorkspaceDocument {
         WorkspaceDocument {
             path: std::path::PathBuf::from(path),

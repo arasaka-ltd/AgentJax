@@ -15,8 +15,10 @@ use crate::{
     api::SessionMessage,
     config::RuntimeConfig,
     core::{EventStore, PersistenceStore, SessionRecord, SessionStore},
+    daemon::task_store::{initial_task_record, StoredTaskRecord, TaskStore},
     domain::{
-        EventSource, EventType, ObjectMeta, RuntimeEvent, Session, SessionMode, SessionStatus,
+        EventSource, EventType, ObjectMeta, ResumePack, RuntimeEvent, Session, SessionMode,
+        SessionStatus, Task, TaskCheckpoint, TaskPhase, TaskTimelineEntry,
     },
     plugins::storage::sqlite_backend::SqlitePersistence,
 };
@@ -32,14 +34,18 @@ pub struct DaemonStore {
     next_event: AtomicU64,
     next_stream: AtomicU64,
     next_subscription: AtomicU64,
+    next_task: AtomicU64,
+    next_checkpoint: AtomicU64,
     active_turn_sessions: Mutex<BTreeSet<String>>,
     persistence: Arc<dyn PersistenceStore>,
+    tasks: TaskStore,
 }
 
 impl DaemonStore {
     pub fn new(runtime_config: RuntimeConfig) -> Result<Self> {
         let sqlite = SqlitePersistence::open(&runtime_config)?;
         let persistence: Arc<dyn PersistenceStore> = Arc::new(SqlitePersistenceBridge::new(sqlite));
+        let tasks = TaskStore::open(&runtime_config)?;
 
         let store = Self {
             runtime_config,
@@ -52,8 +58,11 @@ impl DaemonStore {
             next_event: AtomicU64::new(1),
             next_stream: AtomicU64::new(1),
             next_subscription: AtomicU64::new(1),
+            next_task: AtomicU64::new(1),
+            next_checkpoint: AtomicU64::new(1),
             active_turn_sessions: Mutex::new(BTreeSet::new()),
             persistence,
+            tasks,
         };
         store.ensure_default_session()?;
         Ok(store)
@@ -105,6 +114,16 @@ impl DaemonStore {
         format!("sub_{id}")
     }
 
+    pub fn next_task_id(&self) -> String {
+        let id = self.next_task.fetch_add(1, Ordering::Relaxed);
+        format!("task_{id}")
+    }
+
+    pub fn next_checkpoint_id(&self) -> String {
+        let id = self.next_checkpoint.fetch_add(1, Ordering::Relaxed);
+        format!("checkpoint_{id}")
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
         self.persistence.list_sessions()
     }
@@ -125,6 +144,73 @@ impl DaemonStore {
 
     pub fn upsert_session(&self, session: Session) -> Result<Session> {
         self.persistence.upsert_session(session)
+    }
+
+    pub fn list_tasks(&self) -> Result<Vec<StoredTaskRecord>> {
+        self.tasks.list()
+    }
+
+    pub fn get_task(&self, task_id: &str) -> Result<Option<StoredTaskRecord>> {
+        self.tasks.get(task_id)
+    }
+
+    pub fn create_task(&self, task: Task) -> Result<StoredTaskRecord> {
+        self.tasks.upsert(initial_task_record(task))
+    }
+
+    pub fn update_task(&self, task: Task) -> Result<StoredTaskRecord> {
+        self.tasks.update_task(task)
+    }
+
+    pub fn append_task_timeline(
+        &self,
+        task_id: &str,
+        phase: TaskPhase,
+        status: crate::domain::TaskStatus,
+        turn_id: Option<&str>,
+        event_id: Option<&str>,
+        note: impl Into<String>,
+    ) -> Result<StoredTaskRecord> {
+        self.tasks.append_timeline(
+            task_id,
+            TaskTimelineEntry {
+                entry_id: format!(
+                    "timeline_{}_{}_{}",
+                    task_id,
+                    turn_id.unwrap_or("task"),
+                    self.next_event_id()
+                ),
+                task_id: task_id.into(),
+                phase,
+                status,
+                turn_id: turn_id.map(str::to_string),
+                event_id: event_id.map(str::to_string),
+                note: note.into(),
+                recorded_at: Utc::now(),
+            },
+        )
+    }
+
+    pub fn write_task_checkpoint(
+        &self,
+        task_id: &str,
+        session_id: Option<&str>,
+        turn_id: Option<&str>,
+        summary: impl Into<String>,
+        resume_pack: ResumePack,
+    ) -> Result<StoredTaskRecord> {
+        self.tasks.write_checkpoint(
+            task_id,
+            TaskCheckpoint {
+                checkpoint_id: self.next_checkpoint_id(),
+                task_id: task_id.into(),
+                session_id: session_id.map(str::to_string),
+                turn_id: turn_id.map(str::to_string),
+                summary: summary.into(),
+                created_at: Utc::now(),
+                resume_pack,
+            },
+        )
     }
 
     pub fn mark_turn_active(&self, session_id: &str) -> Result<()> {
@@ -156,6 +242,7 @@ impl DaemonStore {
         &self,
         session_id: &str,
         turn_id: &str,
+        task_id: Option<&str>,
         event_id: &str,
         event_type: EventType,
         payload: Value,
@@ -174,7 +261,7 @@ impl DaemonStore {
             ),
             session_id: Some(session_id.into()),
             turn_id: Some(turn_id.into()),
-            task_id: None,
+            task_id: task_id.map(str::to_string),
             plugin_id: None,
             node_id: None,
             source: EventSource::Operator,

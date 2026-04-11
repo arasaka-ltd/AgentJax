@@ -432,3 +432,103 @@ fn print_json<T: Serialize>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use crate::{
+        api::{ApiMethod, RuntimePingResponse},
+        app::Application,
+        config::{
+            ConfigRoot, RuntimeConfig, WorkspaceConfig, WorkspaceIdentityPack, WorkspacePaths,
+        },
+        daemon::Daemon,
+        transport::unix::UnixSocketServer,
+    };
+
+    use super::request;
+
+    #[tokio::test]
+    async fn cli_request_round_trips_over_unix_socket() {
+        let root = temp_path("cli-request");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&workspace_root).unwrap();
+
+        let socket_path = root.join("daemon.sock");
+        let daemon = Daemon::new(
+            Application::new(
+                ConfigRoot::new(root.join("config")),
+                test_runtime_config(&root, &workspace_root),
+                test_identity(&workspace_root),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let server = tokio::spawn(UnixSocketServer::new(daemon, &socket_path).run());
+        wait_for_socket(&socket_path).await;
+
+        let response: RuntimePingResponse = request(
+            socket_path.clone(),
+            ApiMethod::RuntimePing,
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+
+        assert!(response.pong);
+
+        server.abort();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn test_runtime_config(root: &Path, workspace_root: &Path) -> RuntimeConfig {
+        RuntimeConfig::new(
+            "agentjax-test",
+            crate::config::RuntimePaths::new(root.join("runtime")),
+            WorkspaceConfig::new("default-workspace", WorkspacePaths::new(workspace_root)),
+        )
+    }
+
+    fn test_identity(workspace_root: &Path) -> WorkspaceIdentityPack {
+        WorkspaceIdentityPack {
+            workspace_id: "default-workspace".into(),
+            agent: doc(workspace_root.join("AGENT.md"), ""),
+            soul: doc(workspace_root.join("SOUL.md"), ""),
+            user: doc(workspace_root.join("USER.md"), ""),
+            memory: doc(workspace_root.join("MEMORY.md"), ""),
+            mission: doc(workspace_root.join("MISSION.md"), ""),
+            rules: doc(workspace_root.join("RULES.md"), ""),
+            router: doc(workspace_root.join("ROUTER.md"), ""),
+        }
+    }
+
+    fn doc(path: PathBuf, content: &str) -> crate::config::WorkspaceDocument {
+        crate::config::WorkspaceDocument {
+            path,
+            content: content.into(),
+        }
+    }
+
+    async fn wait_for_socket(path: &Path) {
+        for _ in 0..50 {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("socket was not created: {}", path.display());
+    }
+
+    fn temp_path(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        std::env::temp_dir().join(format!("agentjax-{prefix}-{nanos}"))
+    }
+}

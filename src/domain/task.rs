@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::domain::ObjectMeta;
+use crate::domain::{ObjectMeta, ResumePack};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TaskPriority {
@@ -49,4 +49,27 @@ pub struct Task {
     pub priority: TaskPriority,
     pub goal: String,
     pub checkpoint_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskTimelineEntry {
+    pub entry_id: String,
+    pub task_id: String,
+    pub phase: TaskPhase,
+    pub status: TaskStatus,
+    pub turn_id: Option<String>,
+    pub event_id: Option<String>,
+    pub note: String,
+    pub recorded_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskCheckpoint {
+    pub checkpoint_id: String,
+    pub task_id: String,
+    pub session_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub summary: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub resume_pack: ResumePack,
 }

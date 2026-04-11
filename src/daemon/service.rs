@@ -54,7 +54,6 @@ pub struct Daemon {
 
 #[derive(Default)]
 struct ControlPlaneState {
-    tasks: BTreeMap<String, Task>,
     schedules: BTreeMap<String, Schedule>,
     subscriptions: BTreeMap<String, RegisteredSubscription>,
     streams: BTreeMap<String, RegisteredStream>,
@@ -279,6 +278,7 @@ impl Daemon {
                 .last_turn_id
                 .as_deref()
                 .unwrap_or("turn.model_switch"),
+            None,
             EventType::ModelSwitchRequested,
             json!({
                 "requested_target": requested.clone(),
@@ -292,6 +292,7 @@ impl Daemon {
                     .last_turn_id
                     .as_deref()
                     .unwrap_or("turn.model_switch"),
+                None,
                 EventType::ModelSwitchRejected,
                 json!({
                     "reason": "active turn in progress",
@@ -329,6 +330,7 @@ impl Daemon {
                     .last_turn_id
                     .as_deref()
                     .unwrap_or("turn.model_switch"),
+                None,
                 EventType::ModelSwitchRejected,
                 json!({
                     "reason": error.to_string(),
@@ -361,6 +363,7 @@ impl Daemon {
                 .last_turn_id
                 .as_deref()
                 .unwrap_or("turn.model_switch"),
+            None,
             EventType::ModelSwitchApplied,
             json!({
                 "current_target": {
@@ -629,21 +632,22 @@ impl Daemon {
     }
 
     fn handle_task_list(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        let tasks = self.control.lock().expect("control plane lock poisoned");
-        let items = tasks
-            .tasks
-            .values()
-            .map(|task| TaskListItem {
-                task_id: task.task_id.clone(),
-                kind: match task.execution_mode {
+        let items = self
+            .store
+            .list_tasks()
+            .map_err(internal_store_error)?
+            .into_iter()
+            .map(|record| TaskListItem {
+                task_id: record.task.task_id.clone(),
+                kind: match record.task.execution_mode {
                     ExecutionMode::EphemeralSession => "ephemeral_session".into(),
                     ExecutionMode::BoundSession => "bound_session".into(),
                     ExecutionMode::HeadlessTask => "headless_task".into(),
                 },
-                status: task.status.clone(),
-                agent_id: task.agent_id.clone(),
-                session_id: task.session_id.clone(),
-                created_at: task.meta.created_at,
+                status: record.task.status.clone(),
+                agent_id: record.task.agent_id.clone(),
+                session_id: record.task.session_id.clone(),
+                created_at: record.task.meta.created_at,
             })
             .collect();
         Ok((self.serialize(TaskListResponse { items })?, Vec::new()))
@@ -653,28 +657,45 @@ impl Daemon {
         &self,
         params: TaskGetRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        let task = self
-            .control
-            .lock()
-            .expect("control plane lock poisoned")
-            .tasks
-            .get(&params.task_id)
-            .cloned()
+        let record = self
+            .store
+            .get_task(&params.task_id)
+            .map_err(internal_store_error)?
             .ok_or_else(task_not_found)?;
-        Ok((self.serialize(TaskGetResponse { task })?, Vec::new()))
+        Ok((
+            self.serialize(TaskGetResponse {
+                task: record.task,
+                timeline: record.timeline,
+                checkpoints: record.checkpoints,
+            })?,
+            Vec::new(),
+        ))
     }
 
     fn handle_task_cancel(
         &self,
         params: TaskCancelRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        let mut control = self.control.lock().expect("control plane lock poisoned");
-        let task = control
-            .tasks
-            .get_mut(&params.task_id)
+        let mut task = self
+            .store
+            .get_task(&params.task_id)
+            .map_err(internal_store_error)?
             .ok_or_else(task_not_found)?;
-        task.status = TaskStatus::Cancelled;
-        task.meta.updated_at = Utc::now();
+        task.task.status = TaskStatus::Cancelled;
+        task.task.meta.updated_at = Utc::now();
+        self.store
+            .update_task(task.task)
+            .map_err(internal_store_error)?;
+        self.store
+            .append_task_timeline(
+                &params.task_id,
+                crate::domain::TaskPhase::Cancelled,
+                TaskStatus::Cancelled,
+                None,
+                None,
+                "task cancelled",
+            )
+            .map_err(internal_store_error)?;
         Ok((self.serialize(json!({ "accepted": true }))?, Vec::new()))
     }
 
@@ -682,13 +703,26 @@ impl Daemon {
         &self,
         params: TaskRetryRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        let mut control = self.control.lock().expect("control plane lock poisoned");
-        let task = control
-            .tasks
-            .get_mut(&params.task_id)
+        let mut task = self
+            .store
+            .get_task(&params.task_id)
+            .map_err(internal_store_error)?
             .ok_or_else(task_not_found)?;
-        task.status = TaskStatus::Ready;
-        task.meta.updated_at = Utc::now();
+        task.task.status = TaskStatus::Ready;
+        task.task.meta.updated_at = Utc::now();
+        self.store
+            .update_task(task.task)
+            .map_err(internal_store_error)?;
+        self.store
+            .append_task_timeline(
+                &params.task_id,
+                crate::domain::TaskPhase::Ready,
+                TaskStatus::Ready,
+                None,
+                None,
+                "task retried and returned to ready",
+            )
+            .map_err(internal_store_error)?;
         Ok((self.serialize(json!({ "accepted": true }))?, Vec::new()))
     }
 
@@ -696,12 +730,11 @@ impl Daemon {
         &self,
         params: TaskSubscribeRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        if !self
-            .control
-            .lock()
-            .expect("control plane lock poisoned")
-            .tasks
-            .contains_key(&params.task_id)
+        if self
+            .store
+            .get_task(&params.task_id)
+            .map_err(internal_store_error)?
+            .is_none()
         {
             return Err(task_not_found());
         }
@@ -881,12 +914,7 @@ impl Daemon {
     }
 
     fn handle_metrics_snapshot(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        let task_count = self
-            .control
-            .lock()
-            .expect("control plane lock poisoned")
-            .tasks
-            .len();
+        let task_count = self.store.list_tasks().map_err(internal_store_error)?.len();
         let schedule_count = self
             .control
             .lock()
@@ -977,6 +1005,48 @@ impl Daemon {
             self.store.next_message_id(),
             None,
         );
+        let task_id = self.store.next_task_id();
+        let mut task = Task {
+            meta: ObjectMeta::new(
+                task_id.clone(),
+                &self.app.runtime_config.state_schema_version,
+            ),
+            task_id: task_id.clone(),
+            workspace_id: session.session.workspace_id.clone(),
+            agent_id: Some(session_agent.agent_id.clone()),
+            session_id: Some(params.session_id.clone()),
+            parent_task_id: None,
+            definition_ref: None,
+            execution_mode: ExecutionMode::BoundSession,
+            status: TaskStatus::Running,
+            priority: crate::domain::TaskPriority::Normal,
+            goal: user_message.content.clone(),
+            checkpoint_ref: None,
+        };
+        self.store
+            .create_task(task.clone())
+            .map_err(internal_store_error)?;
+        self.record_event(
+            &params.session_id,
+            &turn_id,
+            Some(&task_id),
+            EventType::TaskStarted,
+            json!({
+                "task_id": task_id,
+                "execution_mode": "bound_session",
+                "goal": task.goal,
+            }),
+        )?;
+        self.store
+            .append_task_timeline(
+                &task_id,
+                crate::domain::TaskPhase::Running,
+                TaskStatus::Running,
+                Some(&turn_id),
+                None,
+                "session.send accepted and task started",
+            )
+            .map_err(internal_store_error)?;
 
         self.store
             .append_message(&params.session_id, &turn_id, user_message.clone())
@@ -984,6 +1054,7 @@ impl Daemon {
         self.record_event(
             &params.session_id,
             &turn_id,
+            Some(&task_id),
             EventType::MessageReceived,
             json!({ "message": user_message }),
         )?;
@@ -992,7 +1063,7 @@ impl Daemon {
             .context_engine
             .assemble_context(ContextAssemblyRequest {
                 session_id: Some(params.session_id.clone()),
-                task_id: None,
+                task_id: Some(task_id.clone()),
                 budget_tokens: 8_000,
                 purpose: ContextAssemblyPurpose::Chat,
                 model_profile: None,
@@ -1007,6 +1078,7 @@ impl Daemon {
         self.record_event(
             &params.session_id,
             &turn_id,
+            Some(&task_id),
             EventType::ContextBuilt,
             json!({
                 "block_count": assembled_context.blocks.len(),
@@ -1017,12 +1089,24 @@ impl Daemon {
         self.record_event(
             &params.session_id,
             &turn_id,
+            Some(&task_id),
             EventType::TurnStarted,
             json!({ "turn_id": turn_id }),
         )?;
+        self.store
+            .append_task_timeline(
+                &task_id,
+                crate::domain::TaskPhase::Running,
+                TaskStatus::Running,
+                Some(&turn_id),
+                None,
+                "turn started",
+            )
+            .map_err(internal_store_error)?;
         self.record_event(
             &params.session_id,
             &turn_id,
+            Some(&task_id),
             EventType::ModelCalled,
             json!({
                 "provider_id": session_agent.provider_id.clone(),
@@ -1054,8 +1138,30 @@ impl Daemon {
                 let _ = self.record_event(
                     &params.session_id,
                     &turn_id,
+                    Some(&task_id),
                     EventType::TurnFailed,
                     json!({ "error": error.to_string() }),
+                );
+                task.status = TaskStatus::Failed;
+                task.meta.updated_at = Utc::now();
+                let _ = self.store.update_task(task.clone());
+                let _ = self.store.append_task_timeline(
+                    &task_id,
+                    crate::domain::TaskPhase::Failed,
+                    TaskStatus::Failed,
+                    Some(&turn_id),
+                    None,
+                    format!("model call failed: {error}"),
+                );
+                let _ = self.record_event(
+                    &params.session_id,
+                    &turn_id,
+                    Some(&task_id),
+                    EventType::TaskFailed,
+                    json!({
+                        "task_id": task_id,
+                        "error": error.to_string(),
+                    }),
                 );
                 ApiError::new(
                     ApiErrorCode::InternalError,
@@ -1066,6 +1172,7 @@ impl Daemon {
         self.record_event(
             &params.session_id,
             &turn_id,
+            Some(&task_id),
             EventType::ModelResponseReceived,
             json!({ "message": first_response }),
         )?;
@@ -1073,6 +1180,7 @@ impl Daemon {
         let assistant_text = if let Some(tool_call) = parse_tool_call(
             &first_response,
             &params.session_id,
+            &task_id,
             &turn_id,
             &session_agent.agent_id,
         )? {
@@ -1089,6 +1197,7 @@ impl Daemon {
             self.record_event(
                 &params.session_id,
                 &turn_id,
+                Some(&task_id),
                 EventType::ModelCalled,
                 json!({
                     "provider_id": session_agent.provider_id.clone(),
@@ -1115,6 +1224,7 @@ impl Daemon {
             self.record_event(
                 &params.session_id,
                 &turn_id,
+                Some(&task_id),
                 EventType::ModelResponseReceived,
                 json!({
                     "message": second_response,
@@ -1136,12 +1246,84 @@ impl Daemon {
         self.store
             .append_message(&params.session_id, &turn_id, assistant_message.clone())
             .map_err(map_store_error)?;
+        let checkpoint = self
+            .app
+            .context_engine
+            .build_resume_pack(Some(&params.session_id), Some(&task_id))
+            .map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::InternalError,
+                    format!("resume pack build failed: {error}"),
+                    false,
+                )
+            })?;
+        self.store
+            .write_task_checkpoint(
+                &task_id,
+                Some(&params.session_id),
+                Some(&turn_id),
+                assistant_message.content.clone(),
+                checkpoint,
+            )
+            .map_err(internal_store_error)?;
         self.record_event(
             &params.session_id,
             &turn_id,
+            Some(&task_id),
+            EventType::TaskCheckpointed,
+            json!({
+                "task_id": task_id,
+                "turn_id": turn_id,
+            }),
+        )?;
+        self.store
+            .append_task_timeline(
+                &task_id,
+                crate::domain::TaskPhase::Checkpointed,
+                TaskStatus::Succeeded,
+                Some(&turn_id),
+                None,
+                "checkpoint recorded from latest assistant output",
+            )
+            .map_err(internal_store_error)?;
+        task.status = TaskStatus::Succeeded;
+        task.checkpoint_ref = self
+            .store
+            .get_task(&task_id)
+            .map_err(internal_store_error)?
+            .and_then(|record| record.task.checkpoint_ref);
+        task.meta.updated_at = Utc::now();
+        self.store
+            .update_task(task.clone())
+            .map_err(internal_store_error)?;
+        self.store
+            .append_task_timeline(
+                &task_id,
+                crate::domain::TaskPhase::Succeeded,
+                TaskStatus::Succeeded,
+                Some(&turn_id),
+                None,
+                "turn completed and task succeeded",
+            )
+            .map_err(internal_store_error)?;
+        self.record_event(
+            &params.session_id,
+            &turn_id,
+            Some(&task_id),
+            EventType::TaskSucceeded,
+            json!({
+                "task_id": task_id,
+                "checkpoint_ref": task.checkpoint_ref,
+            }),
+        )?;
+        self.record_event(
+            &params.session_id,
+            &turn_id,
+            Some(&task_id),
             EventType::TurnSucceeded,
             json!({
                 "turn_id": turn_id,
+                "task_id": task_id,
                 "assistant_message": assistant_message,
             }),
         )?;
@@ -1181,6 +1363,7 @@ impl Daemon {
         &self,
         session_id: &str,
         turn_id: &str,
+        task_id: Option<&str>,
         event_type: EventType,
         payload: Value,
     ) -> Result<(), ApiError> {
@@ -1189,6 +1372,7 @@ impl Daemon {
             .record_event(
                 session_id,
                 turn_id,
+                task_id,
                 &self.store.next_event_id(),
                 event_type,
                 payload,
@@ -1210,6 +1394,7 @@ impl Daemon {
         self.record_event(
             tool_call.session_id.as_deref().unwrap_or("session.default"),
             tool_call.turn_id.as_deref().unwrap_or("turn.unknown"),
+            tool_call.task_id.as_deref(),
             EventType::ToolCalled,
             json!({
                 "tool_call_id": tool_call.tool_call_id,
@@ -1231,6 +1416,7 @@ impl Daemon {
                 self.record_event(
                     tool_call.session_id.as_deref().unwrap_or("session.default"),
                     tool_call.turn_id.as_deref().unwrap_or("turn.unknown"),
+                    tool_call.task_id.as_deref(),
                     EventType::ToolCompleted,
                     json!({
                         "tool_call_id": tool_call.tool_call_id,
@@ -1245,6 +1431,7 @@ impl Daemon {
                 self.record_event(
                     tool_call.session_id.as_deref().unwrap_or("session.default"),
                     tool_call.turn_id.as_deref().unwrap_or("turn.unknown"),
+                    tool_call.task_id.as_deref(),
                     EventType::ToolFailed,
                     json!({
                         "tool_call_id": tool_call.tool_call_id,
@@ -1603,6 +1790,7 @@ fn finalize_message(
 fn parse_tool_call(
     response: &str,
     session_id: &str,
+    task_id: &str,
     turn_id: &str,
     agent_id: &str,
 ) -> Result<Option<ToolCall>, ApiError> {
@@ -1638,7 +1826,7 @@ fn parse_tool_call(
             agent_id: agent_id.into(),
         },
         session_id: Some(session_id.into()),
-        task_id: None,
+        task_id: Some(task_id.into()),
         turn_id: Some(turn_id.into()),
         idempotency_key: Some(format!("{turn_id}:{tool_name}")),
         timeout_secs,
@@ -1739,6 +1927,7 @@ mod tests {
         api::{
             ApiMethod, RequestEnvelope, RequestId, ScheduleCreateRequest, ScheduleUpdateRequest,
             SessionModelInspectResponse, SessionModelSwitchResponse, SessionModelSwitchResult,
+            SessionSendResponse, TaskGetResponse,
         },
         app::Application,
         config::{
@@ -1974,6 +2163,228 @@ mod tests {
             .events
             .iter()
             .any(|event| event.event_type == crate::domain::EventType::TurnSucceeded));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn session_send_creates_task_timeline_and_checkpoint() {
+        let root = temp_path("task-runtime-session-send");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&workspace_root).unwrap();
+
+        let server = spawn_server(vec![(
+            "POST /v1/responses HTTP/1.1".to_string(),
+            vec![
+                "<agentjax_prompt version=\\\"v1\\\">".to_string(),
+                "<content>create task runtime state</content>".to_string(),
+            ],
+            r#"{"id":"resp_task_runtime","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{"id":"msg_task_runtime","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"task runtime assistant reply","annotations":[]}]}],"tools":[]}"#.to_string(),
+        )])
+        .await;
+
+        let daemon = Daemon::new(
+            Application::new(
+                ConfigRoot::new(root.join("config")),
+                test_runtime_config(&root, &workspace_root, Some(format!("http://{}", server.0))),
+                test_identity(&workspace_root),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let send = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_task_runtime_send".into()),
+                method: ApiMethod::SessionSend,
+                params: serde_json::json!({
+                    "session_id": "session.default",
+                    "message": { "role": "user", "content": "create task runtime state" },
+                    "stream": false,
+                }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(send_response) = send.response else {
+            panic!("expected response envelope");
+        };
+        let send_result: SessionSendResponse =
+            serde_json::from_value(send_response.result.unwrap()).unwrap();
+
+        let list = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_task_runtime_list".into()),
+                method: ApiMethod::TaskList,
+                params: serde_json::json!({}),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(list_response) = list.response else {
+            panic!("expected response envelope");
+        };
+        let listed: crate::api::TaskListResponse =
+            serde_json::from_value(list_response.result.unwrap()).unwrap();
+        let task_id = listed
+            .items
+            .iter()
+            .find(|item| item.session_id.as_deref() == Some("session.default"))
+            .map(|item| item.task_id.clone())
+            .expect("session.send should create a bound task");
+
+        let get = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_task_runtime_get".into()),
+                method: ApiMethod::TaskGet,
+                params: serde_json::json!({ "task_id": task_id }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(get_response) = get.response else {
+            panic!("expected response envelope");
+        };
+        let task: TaskGetResponse = serde_json::from_value(get_response.result.unwrap()).unwrap();
+
+        assert_eq!(task.task.status, TaskStatus::Succeeded);
+        assert_eq!(task.task.execution_mode, ExecutionMode::BoundSession);
+        assert!(task
+            .timeline
+            .iter()
+            .any(|entry| entry.phase == crate::domain::TaskPhase::Running));
+        assert!(task
+            .timeline
+            .iter()
+            .any(|entry| entry.phase == crate::domain::TaskPhase::Checkpointed));
+        assert!(task
+            .timeline
+            .iter()
+            .any(|entry| entry.phase == crate::domain::TaskPhase::Succeeded));
+        assert_eq!(task.checkpoints.len(), 1);
+        assert_eq!(
+            task.checkpoints[0].resume_pack.task_id.as_deref(),
+            Some(task.task.task_id.as_str())
+        );
+        assert_eq!(
+            task.checkpoints[0].turn_id.as_deref(),
+            Some(send_result.turn_id.as_str())
+        );
+
+        server.1.abort();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn task_cancel_and_retry_survive_daemon_restart() {
+        let root = temp_path("task-runtime-restart");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&workspace_root).unwrap();
+
+        let runtime_config =
+            test_runtime_config(&root, &workspace_root, Some("http://127.0.0.1:1".into()));
+        let identity = test_identity(&workspace_root);
+
+        let daemon = Daemon::new(
+            Application::new(
+                ConfigRoot::new(root.join("config")),
+                runtime_config.clone(),
+                identity.clone(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        daemon
+            .store
+            .create_task(Task {
+                meta: ObjectMeta::new("task_restart", "2026-04-11"),
+                task_id: "task_restart".into(),
+                workspace_id: "default-workspace".into(),
+                agent_id: Some("default-agent".into()),
+                session_id: Some("session.default".into()),
+                parent_task_id: None,
+                definition_ref: None,
+                execution_mode: ExecutionMode::BoundSession,
+                status: TaskStatus::Pending,
+                priority: crate::domain::TaskPriority::Normal,
+                goal: "persist task runtime state".into(),
+                checkpoint_ref: None,
+            })
+            .unwrap();
+
+        let cancel = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_task_cancel".into()),
+                method: ApiMethod::TaskCancel,
+                params: serde_json::json!({ "task_id": "task_restart" }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(cancel_response) = cancel.response else {
+            panic!("expected response envelope");
+        };
+        assert!(cancel_response.ok);
+
+        drop(daemon);
+
+        let restarted = Daemon::new(
+            Application::new(
+                ConfigRoot::new(root.join("config")),
+                runtime_config,
+                identity,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let cancelled = restarted
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_task_get_cancelled".into()),
+                method: ApiMethod::TaskGet,
+                params: serde_json::json!({ "task_id": "task_restart" }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(cancelled_response) = cancelled.response else {
+            panic!("expected response envelope");
+        };
+        let cancelled_task: TaskGetResponse =
+            serde_json::from_value(cancelled_response.result.unwrap()).unwrap();
+        assert_eq!(cancelled_task.task.status, TaskStatus::Cancelled);
+        assert!(cancelled_task
+            .timeline
+            .iter()
+            .any(|entry| entry.phase == crate::domain::TaskPhase::Cancelled));
+
+        let retry = restarted
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_task_retry".into()),
+                method: ApiMethod::TaskRetry,
+                params: serde_json::json!({ "task_id": "task_restart" }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(retry_response) = retry.response else {
+            panic!("expected response envelope");
+        };
+        assert!(retry_response.ok);
+
+        let retried = restarted
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_task_get_retried".into()),
+                method: ApiMethod::TaskGet,
+                params: serde_json::json!({ "task_id": "task_restart" }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(retried_response) = retried.response else {
+            panic!("expected response envelope");
+        };
+        let retried_task: TaskGetResponse =
+            serde_json::from_value(retried_response.result.unwrap()).unwrap();
+        assert_eq!(retried_task.task.status, TaskStatus::Ready);
+        assert!(retried_task
+            .timeline
+            .iter()
+            .any(|entry| entry.phase == crate::domain::TaskPhase::Ready));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2224,26 +2635,23 @@ mod tests {
         )
         .unwrap();
 
-        {
-            let mut control = daemon.control.lock().unwrap();
-            control.tasks.insert(
-                "task_1".into(),
-                Task {
-                    meta: ObjectMeta::new("task_1", "2026-04-10"),
-                    task_id: "task_1".into(),
-                    workspace_id: "default-workspace".into(),
-                    agent_id: Some("default-agent".into()),
-                    session_id: Some("session.default".into()),
-                    parent_task_id: None,
-                    definition_ref: Some("defs/test".into()),
-                    execution_mode: ExecutionMode::BoundSession,
-                    status: TaskStatus::Pending,
-                    priority: crate::domain::TaskPriority::Normal,
-                    goal: "test task".into(),
-                    checkpoint_ref: None,
-                },
-            );
-        }
+        daemon
+            .store
+            .create_task(Task {
+                meta: ObjectMeta::new("task_1", "2026-04-10"),
+                task_id: "task_1".into(),
+                workspace_id: "default-workspace".into(),
+                agent_id: Some("default-agent".into()),
+                session_id: Some("session.default".into()),
+                parent_task_id: None,
+                definition_ref: Some("defs/test".into()),
+                execution_mode: ExecutionMode::BoundSession,
+                status: TaskStatus::Pending,
+                priority: crate::domain::TaskPriority::Normal,
+                goal: "test task".into(),
+                checkpoint_ref: None,
+            })
+            .unwrap();
 
         let methods = vec![
             (

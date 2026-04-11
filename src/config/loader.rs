@@ -360,6 +360,57 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn load_from_roots_reads_workspace_identity_documents() {
+        let root = temp_path("workspace-identity");
+        let config_root = root.join("config");
+        let runtime_root = root.join("runtime");
+        let workspace_root = root.join("workspace");
+
+        ConfigLoader::initialize_at(
+            &config_root,
+            &runtime_root,
+            &workspace_root,
+            InitMode::Minimal,
+        )
+        .unwrap();
+
+        fs::write(workspace_root.join("AGENT.md"), "agent profile").unwrap();
+        fs::write(workspace_root.join("SOUL.md"), "calm and direct").unwrap();
+        fs::write(workspace_root.join("USER.md"), "prefers concise answers").unwrap();
+        fs::write(
+            workspace_root.join("MEMORY.md"),
+            "remember the current repo status",
+        )
+        .unwrap();
+        fs::write(workspace_root.join("MISSION.md"), "ship the runtime").unwrap();
+        fs::write(workspace_root.join("RULES.md"), "do not guess").unwrap();
+        fs::write(
+            workspace_root.join("ROUTER.md"),
+            "prefer the daemon control plane",
+        )
+        .unwrap();
+
+        let loaded =
+            ConfigLoader::load_from_roots(&config_root, &runtime_root, &workspace_root).unwrap();
+
+        assert_eq!(loaded.workspace_identity.agent.content, "agent profile");
+        assert_eq!(
+            loaded.workspace_identity.router.content,
+            "prefer the daemon control plane"
+        );
+        assert!(loaded
+            .runtime_config
+            .workspace
+            .paths
+            .memory_topics_dir
+            .exists());
+        assert!(loaded.runtime_config.workspace.paths.knowledge_dir.exists());
+        assert!(loaded.runtime_config.workspace.paths.prompts_dir.exists());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn temp_path(prefix: &str) -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)

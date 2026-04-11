@@ -9,7 +9,10 @@ use crate::core::{
     ResourceProviderPlugin, ResourceRegistry, RuntimeHost, StoragePlugin, WorkspaceRuntime,
     WorkspaceRuntimeHost,
 };
-use crate::plugins::context::retrieval_bridge::RetrievalBridgeContextPlugin;
+use crate::plugins::context::{
+    RetrievalBridgeContextPlugin, SummaryLoaderContextPlugin, TaskStateContextPlugin,
+    WorkspaceIdentityContextPlugin,
+};
 use crate::plugins::providers::openai::OpenAiProviderPlugin;
 use crate::plugins::storage::{
     sqlite_backend::SqlitePersistence, sqlite_context::SqliteContextStorePlugin,
@@ -76,6 +79,18 @@ impl Application {
             &mut tool_registry,
             Arc::new(ShellToolPlugin),
         );
+
+        let workspace_identity_plugin = Arc::new(WorkspaceIdentityContextPlugin);
+        plugin_registry.register(workspace_identity_plugin.clone() as PluginRef);
+        plugin_registry.register_context(workspace_identity_plugin as Arc<dyn ContextPlugin>);
+
+        let task_state = Arc::new(TaskStateContextPlugin);
+        plugin_registry.register(task_state.clone() as PluginRef);
+        plugin_registry.register_context(task_state as Arc<dyn ContextPlugin>);
+
+        let summary_loader = Arc::new(SummaryLoaderContextPlugin);
+        plugin_registry.register(summary_loader.clone() as PluginRef);
+        plugin_registry.register_context(summary_loader as Arc<dyn ContextPlugin>);
 
         let context_plugin = Arc::new(RetrievalBridgeContextPlugin::new(
             &workspace_runtime.workspace.paths,
