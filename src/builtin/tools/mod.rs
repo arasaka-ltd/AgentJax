@@ -7,13 +7,22 @@ use serde_json::Value;
 
 use crate::{core::Plugin, domain::ToolCall};
 
-pub mod list_files;
-pub mod read_file;
-pub mod shell;
+pub mod edit;
+pub mod knowledge_get;
+pub mod knowledge_search;
+pub mod memory_get;
+pub mod memory_search;
+pub mod read;
+pub mod support;
+pub mod write;
 
-pub use list_files::ListFilesToolPlugin;
-pub use read_file::ReadFileToolPlugin;
-pub use shell::ShellToolPlugin;
+pub use edit::EditToolPlugin;
+pub use knowledge_get::KnowledgeGetToolPlugin;
+pub use knowledge_search::KnowledgeSearchToolPlugin;
+pub use memory_get::MemoryGetToolPlugin;
+pub use memory_search::MemorySearchToolPlugin;
+pub use read::ReadToolPlugin;
+pub use write::WriteToolPlugin;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolDescriptor {
@@ -59,9 +68,13 @@ impl ToolRegistry {
 
     pub fn builtins() -> Self {
         let mut registry = Self::default();
-        registry.register(Arc::new(ReadFileToolPlugin::default()));
-        registry.register(Arc::new(ListFilesToolPlugin::default()));
-        registry.register(Arc::new(ShellToolPlugin::default()));
+        registry.register(Arc::new(ReadToolPlugin::default()));
+        registry.register(Arc::new(EditToolPlugin::default()));
+        registry.register(Arc::new(WriteToolPlugin::default()));
+        registry.register(Arc::new(MemorySearchToolPlugin::default()));
+        registry.register(Arc::new(MemoryGetToolPlugin::default()));
+        registry.register(Arc::new(KnowledgeSearchToolPlugin::default()));
+        registry.register(Arc::new(KnowledgeGetToolPlugin::default()));
         registry
     }
 }
@@ -74,52 +87,83 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     use super::ToolRegistry;
     use crate::domain::{ToolCall, ToolCaller};
 
     #[tokio::test]
-    async fn builtins_cover_read_file_list_files_and_shell() {
+    async fn builtins_cover_read_edit_and_write() {
         let root = temp_path("tools");
         fs::create_dir_all(&root).unwrap();
-        let file = root.join("note.txt");
-        fs::write(&file, "hello tools").unwrap();
+        let memory_file = root.join("MEMORY.md");
+        fs::write(&memory_file, "## Stable Facts\r\nhello\r\ntools\r\n").unwrap();
+        let knowledge_file = root.join("knowledge/rust/notes/ownership.md");
 
         let registry = ToolRegistry::builtins();
-        assert!(registry.get("read_file").is_some());
-        assert!(registry.get("list_files").is_some());
-        assert!(registry.get("shell").is_some());
+        assert!(registry.get("read").is_some());
+        assert!(registry.get("edit").is_some());
+        assert!(registry.get("write").is_some());
 
         let read = registry
-            .get("read_file")
+            .get("read")
             .unwrap()
             .invoke(&tool_call(
-                "read_file",
-                json!({ "path": file.display().to_string() }),
+                "read",
+                json!({ "path": memory_file.display().to_string(), "start_line": 1, "end_line": 2 }),
             ))
             .await
             .unwrap();
-        assert_eq!(read.content, "hello tools");
+        let read_json = parse_output(&read.content);
+        assert_eq!(read_json["newline"], "crlf");
+        assert_eq!(read_json["kind"], "text");
+        assert!(read_json["content"]
+            .as_str()
+            .unwrap()
+            .contains("1| ## Stable Facts"));
 
-        let list = registry
-            .get("list_files")
+        let edit = registry
+            .get("edit")
             .unwrap()
             .invoke(&tool_call(
-                "list_files",
-                json!({ "path": root.display().to_string() }),
+                "edit",
+                json!({
+                    "path": memory_file.display().to_string(),
+                    "start_line": 2,
+                    "start_column": 1,
+                    "end_line": 2,
+                    "end_column": 6,
+                    "new_text": "world"
+                }),
             ))
             .await
             .unwrap();
-        assert!(list.content.contains("note.txt"));
+        let edit_json = parse_output(&edit.content);
+        assert_eq!(edit_json["applied"], true);
+        assert_eq!(
+            fs::read_to_string(&memory_file).unwrap(),
+            "## Stable Facts\r\nworld\r\ntools\r\n"
+        );
 
-        let shell = registry
-            .get("shell")
+        let write = registry
+            .get("write")
             .unwrap()
-            .invoke(&tool_call("shell", json!({ "command": "printf tool-ok" })))
+            .invoke(&tool_call(
+                "write",
+                json!({
+                    "path": knowledge_file.display().to_string(),
+                    "content": "# Ownership\n\nRust ownership rules...\n",
+                    "create_dirs": true
+                }),
+            ))
             .await
             .unwrap();
-        assert!(shell.content.contains("tool-ok"));
+        let write_json = parse_output(&write.content);
+        assert_eq!(write_json["created"], true);
+        assert_eq!(
+            fs::read_to_string(&knowledge_file).unwrap(),
+            "# Ownership\n\nRust ownership rules...\n"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -138,6 +182,10 @@ mod tests {
             idempotency_key: Some(format!("idempotent-{name}")),
             timeout_secs: Some(2),
         }
+    }
+
+    fn parse_output(content: &str) -> Value {
+        serde_json::from_str(content).unwrap()
     }
 
     fn temp_path(prefix: &str) -> PathBuf {

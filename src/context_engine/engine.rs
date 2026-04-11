@@ -1,5 +1,9 @@
-use crate::builtin::context::retrieval_bridge::{
-    RetrievalBridgeContextPlugin, RetrievalCollectionKind, RetrievedDocument,
+use crate::builtin::context::{
+    retrieval_bridge::RetrievalBridgeContextPlugin,
+    retrieval_types::{
+        KnowledgeSearchRequest, MemorySearchRequest, MemorySearchScope, RetrievalDocument,
+        RetrievalDocumentKind, RetrievalMode, RetrievalScope,
+    },
 };
 use crate::config::{WorkspaceIdentityPack, WorkspacePaths};
 use crate::context_engine::{
@@ -128,12 +132,16 @@ impl ContextEngine for WorkspaceContextEngine {
             ),
         ];
 
-        let memory_blocks =
-            self.recall_memory_blocks(&retrieval_query, request.budget_tokens as usize / 100)?;
-        let knowledge_blocks =
-            self.retrieve_knowledge_blocks(&retrieval_query, request.budget_tokens as usize / 150)?;
-        blocks.extend(memory_blocks);
-        blocks.extend(knowledge_blocks);
+        if matches!(request.retrieval_scope, RetrievalScope::Implicit) {
+            let memory_blocks =
+                self.recall_memory_blocks(&retrieval_query, request.budget_tokens as usize / 100)?;
+            let knowledge_blocks = self.retrieve_knowledge_blocks(
+                &retrieval_query,
+                request.budget_tokens as usize / 150,
+            )?;
+            blocks.extend(memory_blocks);
+            blocks.extend(knowledge_blocks);
+        }
 
         if !transcript.is_empty() {
             blocks.push(ContextBlock {
@@ -207,8 +215,8 @@ impl ContextEngine for WorkspaceContextEngine {
             included_refs,
             omitted_refs: Vec::new(),
             system_prompt_additions: vec![format!(
-                "workspace_id={}, purpose={:?}",
-                self.identity.workspace_id, request.purpose
+                "workspace_id={}, purpose={:?}, retrieval_scope={:?}",
+                self.identity.workspace_id, request.purpose, request.retrieval_scope
             )],
         })
     }
@@ -238,9 +246,16 @@ impl ContextEngine for WorkspaceContextEngine {
 
 impl WorkspaceContextEngine {
     fn recall_memory_blocks(&self, query: &str, limit: usize) -> Result<Vec<ContextBlock>> {
-        let results = self
-            .retrieval
-            .recall_memory(&self.identity.memory, query, limit.max(1))?;
+        let results = self.retrieval.search_memory(
+            &self.identity.memory,
+            &MemorySearchRequest {
+                query: query.to_string(),
+                top_k: limit.max(1),
+                scope: MemorySearchScope::All,
+                mode: RetrievalMode::Keyword,
+                include_excerpt: true,
+            },
+        )?;
         Ok(results
             .into_iter()
             .enumerate()
@@ -249,7 +264,16 @@ impl WorkspaceContextEngine {
     }
 
     fn retrieve_knowledge_blocks(&self, query: &str, limit: usize) -> Result<Vec<ContextBlock>> {
-        let results = self.retrieval.retrieve_knowledge(query, limit.max(1))?;
+        let results = self.retrieval.search_knowledge(&KnowledgeSearchRequest {
+            query: query.to_string(),
+            top_k: limit.max(1),
+            library: None,
+            libraries: Vec::new(),
+            path_prefix: None,
+            mode: RetrievalMode::Keyword,
+            metadata_filters: None,
+            include_excerpt: true,
+        })?;
         Ok(results
             .into_iter()
             .enumerate()
@@ -280,20 +304,20 @@ fn estimate_tokens(content: &str) -> u32 {
     content.split_whitespace().count() as u32
 }
 
-fn retrieved_block(index: usize, item: RetrievedDocument) -> ContextBlock {
+fn retrieved_block(index: usize, item: RetrievalDocument) -> ContextBlock {
     let (kind, source, freshness, confidence) = match item.kind {
-        RetrievalCollectionKind::Memory => (
+        RetrievalDocumentKind::Memory => (
             ContextBlockKind::Memory,
             ContextSource::Memory {
-                memory_ref: item.document_ref.clone(),
+                memory_ref: item.stable_ref.clone(),
             },
             Some(Freshness::Warm),
             Some(Confidence::High),
         ),
-        RetrievalCollectionKind::Knowledge => (
+        RetrievalDocumentKind::Knowledge => (
             ContextBlockKind::RetrievedKnowledge,
             ContextSource::Knowledge {
-                knowledge_ref: item.document_ref.clone(),
+                knowledge_ref: item.stable_ref.clone(),
             },
             Some(Freshness::Fresh),
             Some(Confidence::Medium),
@@ -301,14 +325,14 @@ fn retrieved_block(index: usize, item: RetrievedDocument) -> ContextBlock {
     };
 
     ContextBlock {
-        block_id: format!("retrieval.{}.{}", item.collection_id, index),
+        block_id: format!("retrieval.{}", index),
         kind,
         source,
         priority: 40 + item.score,
-        token_estimate: Some(estimate_tokens(&item.content)),
+        token_estimate: Some(estimate_tokens(&item.excerpt)),
         freshness,
         confidence,
-        content: format!("{}:\n{}", item.title, item.content),
+        content: format!("{}:\n{}", item.title, item.excerpt),
     }
 }
 
@@ -323,6 +347,7 @@ mod tests {
 
     use super::{ContextEngine, WorkspaceContextEngine};
     use crate::{
+        builtin::context::retrieval_types::RetrievalScope,
         config::{WorkspaceDocument, WorkspaceIdentityPack, WorkspacePaths},
         context_engine::ContextAssemblyRequest,
         domain::{ContextAssemblyPurpose, ContextBlockKind, EventSource, EventType, RuntimeEvent},
@@ -395,6 +420,7 @@ mod tests {
                 budget_tokens: 8000,
                 purpose: ContextAssemblyPurpose::Chat,
                 model_profile: None,
+                retrieval_scope: RetrievalScope::Implicit,
             })
             .expect("assemble context");
 
@@ -415,6 +441,93 @@ mod tests {
             .iter()
             .any(|block| block.block_id == "transcript.recent"));
         assert!(assembled.token_breakdown.total > 0);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn explicit_only_scope_skips_implicit_retrieval_blocks() {
+        let root = temp_path("context-engine-explicit-only");
+        let paths = WorkspacePaths::new(&root);
+        fs::create_dir_all(&paths.memory_topics_dir).unwrap();
+        fs::create_dir_all(&paths.knowledge_dir).unwrap();
+        fs::write(
+            paths.memory_topics_dir.join("project-alpha.md"),
+            "Project Alpha uses Rust heavily for automation.",
+        )
+        .unwrap();
+        fs::write(
+            paths.knowledge_dir.join("api.md"),
+            "Health endpoint documentation lives at /health and /ready.",
+        )
+        .unwrap();
+
+        let engine = WorkspaceContextEngine::new(
+            WorkspaceIdentityPack {
+                workspace_id: "ws-test".into(),
+                agent: doc("AGENT.md", "agent identity"),
+                soul: doc("SOUL.md", "calm and direct"),
+                user: doc("USER.md", "prefers concise answers"),
+                memory: WorkspaceDocument {
+                    path: paths.memory_file.clone(),
+                    content: "Stable fact: Project Alpha prefers Rust.".into(),
+                },
+                mission: doc("MISSION.md", "ship useful agents"),
+                rules: doc("RULES.md", "do not guess"),
+                router: doc("ROUTER.md", "use memory when relevant"),
+            },
+            paths.clone(),
+        );
+
+        engine
+            .append_event(RuntimeEvent {
+                event_id: "evt_1".into(),
+                event_type: EventType::MessageReceived,
+                occurred_at: Utc::now(),
+                workspace_id: Some("ws-test".into()),
+                agent_id: Some("default-agent".into()),
+                session_id: Some("session.default".into()),
+                turn_id: Some("turn_1".into()),
+                task_id: None,
+                plugin_id: None,
+                node_id: None,
+                source: EventSource::Operator,
+                causation_id: None,
+                correlation_id: None,
+                idempotency_key: None,
+                payload: json!({
+                    "message": {
+                        "role": "user",
+                        "content": "where is the health endpoint and does project alpha use rust"
+                    }
+                }),
+                schema_version: "event.v1".into(),
+            })
+            .expect("append user event");
+
+        let assembled = engine
+            .assemble_context(ContextAssemblyRequest {
+                session_id: Some("session.default".into()),
+                task_id: None,
+                budget_tokens: 8000,
+                purpose: ContextAssemblyPurpose::Chat,
+                model_profile: None,
+                retrieval_scope: RetrievalScope::ExplicitOnly,
+            })
+            .expect("assemble context");
+
+        assert!(assembled
+            .blocks
+            .iter()
+            .all(|block| block.kind != ContextBlockKind::Memory));
+        assert!(assembled
+            .blocks
+            .iter()
+            .all(|block| block.kind != ContextBlockKind::RetrievedKnowledge));
+        assert!(assembled
+            .system_prompt_additions
+            .iter()
+            .any(|line| line.contains("retrieval_scope=ExplicitOnly")));
 
         let _ = fs::remove_dir_all(root);
     }

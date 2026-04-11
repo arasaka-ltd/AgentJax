@@ -1076,6 +1076,7 @@ impl Daemon {
                 budget_tokens: 8_000,
                 purpose: ContextAssemblyPurpose::Chat,
                 model_profile: None,
+                retrieval_scope: crate::builtin::context::retrieval_types::RetrievalScope::Implicit,
             })
             .map_err(|error| {
                 ApiError::new(
@@ -1955,8 +1956,8 @@ mod tests {
                     "<content>show files</content>".to_string(),
                 ],
                 format!(
-                    r#"{{"id":"resp_1","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{{"type":"output_text","text":"TOOL_CALL {{\"tool\":\"list_files\",\"args\":{{\"path\":\"{}\"}}}}","annotations":[]}}]}}],"tools":[]}}"#,
-                    sample_dir.display()
+                    r#"{{"id":"resp_1","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{{"type":"output_text","text":"TOOL_CALL {{\"tool\":\"read\",\"args\":{{\"path\":\"{}\",\"start_line\":1,\"end_line\":1}}}}","annotations":[]}}]}}],"tools":[]}}"#,
+                    sample_dir.join("a.txt").display()
                 ),
             ),
             (

@@ -608,15 +608,72 @@ mod tests {
                 omitted_refs: vec![],
                 system_prompt_additions: vec!["workspace_id=test".into()],
             },
-            tools: vec![ToolDescriptor {
-                name: "read_file".into(),
-                description: "Read a file".into(),
-                when_to_use: "Use when file contents are needed.".into(),
-                when_not_to_use: "Do not use for destructive actions.".into(),
-                arguments_schema: json!({ "path": "string" }),
-                default_timeout_secs: 5,
-                idempotent: true,
-            }],
+            tools: vec![
+                ToolDescriptor {
+                    name: "read".into(),
+                    description: "Read a file".into(),
+                    when_to_use: "Use when file contents are needed.".into(),
+                    when_not_to_use: "Do not use for destructive actions.".into(),
+                    arguments_schema: json!({ "path": "string" }),
+                    default_timeout_secs: 5,
+                    idempotent: true,
+                },
+                ToolDescriptor {
+                    name: "edit".into(),
+                    description: "Edit a file range".into(),
+                    when_to_use: "Use when a precise text range must change.".into(),
+                    when_not_to_use: "Do not use to create new files.".into(),
+                    arguments_schema: json!({ "path": "string", "start_line": "integer", "start_column": "integer", "end_line": "integer", "end_column": "integer", "new_text": "string" }),
+                    default_timeout_secs: 5,
+                    idempotent: false,
+                },
+                ToolDescriptor {
+                    name: "write".into(),
+                    description: "Write a full file".into(),
+                    when_to_use: "Use when creating or fully replacing a file.".into(),
+                    when_not_to_use: "Do not use for partial edits.".into(),
+                    arguments_schema: json!({ "path": "string", "content": "string" }),
+                    default_timeout_secs: 5,
+                    idempotent: false,
+                },
+                ToolDescriptor {
+                    name: "memory.search".into(),
+                    description: "Search long-term memory documents.".into(),
+                    when_to_use: "Use for stable facts and preferences.".into(),
+                    when_not_to_use: "Do not use when the exact memory entry is already known."
+                        .into(),
+                    arguments_schema: json!({ "query": "string", "scope": "string" }),
+                    default_timeout_secs: 5,
+                    idempotent: true,
+                },
+                ToolDescriptor {
+                    name: "memory.get".into(),
+                    description: "Read a memory entry by ref.".into(),
+                    when_to_use: "Use after memory.search or with a known memory_ref.".into(),
+                    when_not_to_use: "Do not use to discover candidates.".into(),
+                    arguments_schema: json!({ "memory_ref": "string" }),
+                    default_timeout_secs: 5,
+                    idempotent: true,
+                },
+                ToolDescriptor {
+                    name: "knowledge.search".into(),
+                    description: "Search knowledge libraries.".into(),
+                    when_to_use: "Use for evidence-oriented retrieval.".into(),
+                    when_not_to_use: "Do not use when the exact document is already known.".into(),
+                    arguments_schema: json!({ "query": "string", "library": "string" }),
+                    default_timeout_secs: 5,
+                    idempotent: true,
+                },
+                ToolDescriptor {
+                    name: "knowledge.get".into(),
+                    description: "Read a knowledge document by ref.".into(),
+                    when_to_use: "Use after knowledge.search or with a known doc_ref.".into(),
+                    when_not_to_use: "Do not use to discover candidates.".into(),
+                    arguments_schema: json!({ "doc_ref": "string" }),
+                    default_timeout_secs: 5,
+                    idempotent: true,
+                },
+            ],
             conversation_messages: vec![
                 SessionMessage::assistant("previous answer"),
                 SessionMessage::tool_result("hello"),
@@ -632,8 +689,13 @@ mod tests {
         });
 
         assert!(xml.contains("<agentjax_prompt version=\"v1\">"));
-        assert!(xml.contains("<tools>"));
-        assert!(xml.contains("<tool_call_protocol mode=\"agentjax.v0.compat\">"));
+        assert!(xml.contains("<tool name=\"read\""));
+        assert!(xml.contains("<tool name=\"edit\""));
+        assert!(xml.contains("<tool name=\"write\""));
+        assert!(xml.contains("<tool name=\"memory.search\""));
+        assert!(xml.contains("<tool name=\"memory.get\""));
+        assert!(xml.contains("<tool name=\"knowledge.search\""));
+        assert!(xml.contains("<tool name=\"knowledge.get\""));
         assert!(xml.contains("<message kind=\"assistant\">"));
         assert!(xml.contains("<message kind=\"tool_result\">"));
         assert!(xml.contains("<message kind=\"user\">"));

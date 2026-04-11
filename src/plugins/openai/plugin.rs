@@ -582,9 +582,9 @@ mod tests {
         );
         assert_eq!(
             collapse_repeated_text(
-                "TOOL_CALL {\"tool\":\"list_files\"}TOOL_CALL {\"tool\":\"list_files\"}".into()
+                "TOOL_CALL {\"tool\":\"read\"}TOOL_CALL {\"tool\":\"read\"}".into()
             ),
-            "TOOL_CALL {\"tool\":\"list_files\"}"
+            "TOOL_CALL {\"tool\":\"read\"}"
         );
         assert_eq!(collapse_repeated_text("unique text".into()), "unique text");
     }

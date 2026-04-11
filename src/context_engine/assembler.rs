@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::domain::{ContextAssemblyPurpose, ContextBlock};
+use crate::{
+    builtin::context::retrieval_types::RetrievalScope,
+    domain::{ContextAssemblyPurpose, ContextBlock},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContextAssemblyRequest {
@@ -9,6 +12,7 @@ pub struct ContextAssemblyRequest {
     pub budget_tokens: u32,
     pub purpose: ContextAssemblyPurpose,
     pub model_profile: Option<String>,
+    pub retrieval_scope: RetrievalScope,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

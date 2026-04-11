@@ -3,11 +3,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
+use serde_json::json;
 
 use crate::config::{WorkspaceDocument, WorkspacePaths};
 use crate::{
+    builtin::context::retrieval_types::{
+        chunk_ref_for, doc_ref_for, memory_ref_for, KnowledgeGetRequest, KnowledgeSearchRequest,
+        MemoryGetRequest, MemorySearchRequest, MemorySearchScope, RetrievalDocument,
+        RetrievalDocumentKind, RetrievedContent,
+    },
     core::{ContextPlugin, Plugin},
     domain::{
         ContextCapability, KnowledgeCapability, MemoryCapability, Permission, PluginCapability,
@@ -16,30 +22,14 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RetrievalCollectionKind {
-    Memory,
-    Knowledge,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievalCollection {
     pub collection_id: String,
-    pub kind: RetrievalCollectionKind,
     pub root: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RetrievedDocument {
-    pub collection_id: String,
-    pub kind: RetrievalCollectionKind,
-    pub document_ref: String,
-    pub title: String,
-    pub content: String,
-    pub score: u32,
 }
 
 #[derive(Debug, Clone)]
 pub struct RetrievalBridgeContextPlugin {
+    paths: WorkspacePaths,
     memory_collection: RetrievalCollection,
     knowledge_collection: RetrievalCollection,
 }
@@ -47,14 +37,13 @@ pub struct RetrievalBridgeContextPlugin {
 impl RetrievalBridgeContextPlugin {
     pub fn new(paths: &WorkspacePaths) -> Self {
         Self {
+            paths: paths.clone(),
             memory_collection: RetrievalCollection {
                 collection_id: "memory".into(),
-                kind: RetrievalCollectionKind::Memory,
-                root: paths.memory_topics_dir.clone(),
+                root: paths.memory_dir.clone(),
             },
             knowledge_collection: RetrievalCollection {
                 collection_id: "knowledge".into(),
-                kind: RetrievalCollectionKind::Knowledge,
                 root: paths.knowledge_dir.clone(),
             },
         }
@@ -67,64 +56,290 @@ impl RetrievalBridgeContextPlugin {
         ]
     }
 
-    pub fn recall_memory(
+    pub fn search_memory(
         &self,
         memory_document: &WorkspaceDocument,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<RetrievedDocument>> {
+        request: &MemorySearchRequest,
+    ) -> Result<Vec<RetrievalDocument>> {
         let mut results = Vec::new();
-
-        if let Some(score) = score_content(query, &memory_document.content) {
-            results.push(RetrievedDocument {
-                collection_id: self.memory_collection.collection_id.clone(),
-                kind: RetrievalCollectionKind::Memory,
-                document_ref: memory_document.path.display().to_string(),
-                title: file_title(&memory_document.path),
-                content: compact_excerpt(&memory_document.content, query),
-                score,
-            });
+        if matches!(
+            request.scope,
+            MemorySearchScope::MemoryMd | MemorySearchScope::All
+        ) {
+            if let Some(score) = score_content(&request.query, &memory_document.content) {
+                results.push(RetrievalDocument {
+                    kind: RetrievalDocumentKind::Memory,
+                    stable_ref: memory_ref_for("memory_md", "memory"),
+                    chunk_ref: Some(chunk_ref_for("memory", "memory", "1")),
+                    library: None,
+                    path: memory_document.path.display().to_string(),
+                    title: "MEMORY".into(),
+                    excerpt: compact_excerpt(&memory_document.content, &request.query),
+                    score,
+                    line_start: Some(1),
+                    line_end: Some(memory_document.content.lines().count().max(1)),
+                    metadata: Some(json!({ "scope": "memory_md" })),
+                });
+            }
         }
 
-        results.extend(self.search_collection(&self.memory_collection, query, limit)?);
+        let scoped_root = match request.scope {
+            MemorySearchScope::Topics => self.paths.memory_topics_dir.clone(),
+            MemorySearchScope::Profiles => self.paths.memory_profiles_dir.clone(),
+            MemorySearchScope::Daily => self.paths.memory_daily_dir.clone(),
+            _ => self.paths.memory_dir.clone(),
+        };
+        results.extend(self.search_memory_paths(&scoped_root, request)?);
         results.sort_by(|left, right| right.score.cmp(&left.score));
-        results.truncate(limit);
+        results.truncate(request.top_k.max(1));
         Ok(results)
     }
 
-    pub fn retrieve_knowledge(&self, query: &str, limit: usize) -> Result<Vec<RetrievedDocument>> {
-        self.search_collection(&self.knowledge_collection, query, limit)
+    pub fn get_memory(&self, request: &MemoryGetRequest) -> Result<RetrievedContent> {
+        let path = if let Some(memory_ref) = &request.memory_ref {
+            self.resolve_memory_ref(memory_ref)?
+        } else if let Some(path) = &request.path {
+            PathBuf::from(path)
+        } else {
+            bail!("memory.get requires memory_ref or path");
+        };
+        let stable_ref = request
+            .memory_ref
+            .clone()
+            .unwrap_or_else(|| memory_ref_for("path", &path.display().to_string()));
+        self.get_content(
+            path,
+            stable_ref,
+            None,
+            request.start_line,
+            request.end_line,
+            request.max_lines,
+        )
     }
 
-    fn search_collection(
+    pub fn search_knowledge(
         &self,
-        collection: &RetrievalCollection,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<RetrievedDocument>> {
+        request: &KnowledgeSearchRequest,
+    ) -> Result<Vec<RetrievalDocument>> {
+        let mut roots = Vec::new();
+        if let Some(library) = &request.library {
+            roots.push((
+                Some(library.clone()),
+                self.paths.knowledge_dir.join(library),
+            ));
+        }
+        for library in &request.libraries {
+            roots.push((
+                Some(library.clone()),
+                self.paths.knowledge_dir.join(library),
+            ));
+        }
+        if roots.is_empty() {
+            roots.push((None, self.paths.knowledge_dir.clone()));
+        }
+
         let mut results = Vec::new();
-        if query.trim().is_empty() || !collection.root.exists() {
+        for (library, root) in roots {
+            results.extend(self.search_knowledge_paths(&root, library.as_deref(), request)?);
+        }
+        results.sort_by(|left, right| right.score.cmp(&left.score));
+        results.truncate(request.top_k.max(1));
+        Ok(results)
+    }
+
+    pub fn get_knowledge(&self, request: &KnowledgeGetRequest) -> Result<RetrievedContent> {
+        let (path, stable_ref, library) = if let Some(doc_ref) = &request.doc_ref {
+            self.resolve_doc_ref(doc_ref)?
+        } else if let Some(path) = &request.path {
+            (
+                PathBuf::from(path),
+                doc_ref_for(request.library.as_deref().unwrap_or("workspace"), path),
+                request.library.clone(),
+            )
+        } else {
+            bail!("knowledge.get requires doc_ref or path");
+        };
+        self.get_content(
+            path,
+            stable_ref,
+            library,
+            request.start_line,
+            request.end_line,
+            request.max_lines,
+        )
+    }
+
+    fn search_memory_paths(
+        &self,
+        root: &Path,
+        request: &MemorySearchRequest,
+    ) -> Result<Vec<RetrievalDocument>> {
+        let mut results = Vec::new();
+        if request.query.trim().is_empty() || !root.exists() {
             return Ok(results);
         }
 
-        for path in discover_text_files(&collection.root)? {
+        for path in discover_text_files(root)? {
             let content = fs::read_to_string(&path)?;
-            let Some(score) = score_content(query, &content) else {
+            let Some(score) = score_content(&request.query, &content) else {
                 continue;
             };
-            results.push(RetrievedDocument {
-                collection_id: collection.collection_id.clone(),
-                kind: collection.kind.clone(),
-                document_ref: path.display().to_string(),
+            let scope = memory_scope_for_path(&self.paths, &path);
+            let slug = memory_slug_for_path(&self.paths, &path);
+            results.push(RetrievalDocument {
+                kind: RetrievalDocumentKind::Memory,
+                stable_ref: memory_ref_for(scope, &slug),
+                chunk_ref: Some(chunk_ref_for("memory", &slug, "1")),
+                library: None,
+                path: path.display().to_string(),
                 title: file_title(&path),
-                content: compact_excerpt(&content, query),
+                excerpt: compact_excerpt(&content, &request.query),
                 score,
+                line_start: Some(1),
+                line_end: Some(content.lines().count().max(1)),
+                metadata: Some(json!({ "scope": scope })),
             });
         }
 
-        results.sort_by(|left, right| right.score.cmp(&left.score));
-        results.truncate(limit);
         Ok(results)
+    }
+
+    fn search_knowledge_paths(
+        &self,
+        root: &Path,
+        library: Option<&str>,
+        request: &KnowledgeSearchRequest,
+    ) -> Result<Vec<RetrievalDocument>> {
+        let mut results = Vec::new();
+        if request.query.trim().is_empty() || !root.exists() {
+            return Ok(results);
+        }
+
+        for path in discover_text_files(root)? {
+            let relative = path
+                .strip_prefix(&self.paths.knowledge_dir)
+                .unwrap_or(&path);
+            let relative_str = relative.display().to_string();
+            if let Some(prefix) = &request.path_prefix {
+                if !relative_str.contains(prefix) {
+                    continue;
+                }
+            }
+            let content = fs::read_to_string(&path)?;
+            let Some(score) = score_content(&request.query, &content) else {
+                continue;
+            };
+            let resolved_library = library.map(str::to_string).or_else(|| {
+                relative
+                    .iter()
+                    .next()
+                    .map(|part| part.to_string_lossy().to_string())
+            });
+            let doc_id = relative_str
+                .trim_end_matches(".md")
+                .trim_end_matches(".txt");
+            results.push(RetrievalDocument {
+                kind: RetrievalDocumentKind::Knowledge,
+                stable_ref: doc_ref_for(resolved_library.as_deref().unwrap_or("workspace"), doc_id),
+                chunk_ref: Some(chunk_ref_for(
+                    resolved_library.as_deref().unwrap_or("workspace"),
+                    doc_id,
+                    "1",
+                )),
+                library: resolved_library.clone(),
+                path: path.display().to_string(),
+                title: file_title(&path),
+                excerpt: compact_excerpt(&content, &request.query),
+                score,
+                line_start: Some(1),
+                line_end: Some(content.lines().count().max(1)),
+                metadata: Some(json!({ "library": resolved_library, "path": relative_str })),
+            });
+        }
+
+        Ok(results)
+    }
+
+    fn get_content(
+        &self,
+        path: PathBuf,
+        stable_ref: String,
+        library: Option<String>,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+        max_lines: Option<usize>,
+    ) -> Result<RetrievedContent> {
+        let content = fs::read_to_string(&path)?;
+        let lines: Vec<&str> = content.lines().collect();
+        let total_lines = lines.len().max(1);
+        let start = start_line.unwrap_or(1).max(1).min(total_lines);
+        let mut end = end_line.unwrap_or(total_lines).max(start).min(total_lines);
+        if end_line.is_none() {
+            if let Some(max_lines) = max_lines {
+                end = (start + max_lines.saturating_sub(1)).min(total_lines);
+            }
+        }
+        let rendered = lines
+            .iter()
+            .enumerate()
+            .skip(start - 1)
+            .take(end - start + 1)
+            .map(|(idx, line)| format!("{}| {}", idx + 1, line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Ok(RetrievedContent {
+            stable_ref,
+            chunk_ref: Some(chunk_ref_for(
+                library.as_deref().unwrap_or("memory"),
+                &file_title(&path),
+                &format!("{start}-{end}"),
+            )),
+            path: path.display().to_string(),
+            title: file_title(&path),
+            library,
+            content: rendered,
+            start_line: start,
+            end_line: end,
+            total_lines,
+            truncated: end < total_lines,
+        })
+    }
+
+    fn resolve_memory_ref(&self, memory_ref: &str) -> Result<PathBuf> {
+        let Some(rest) = memory_ref.strip_prefix("mem:") else {
+            bail!("invalid memory_ref: {memory_ref}");
+        };
+        let mut parts = rest.splitn(2, '/');
+        let scope = parts.next().unwrap_or_default();
+        let slug = parts.next().unwrap_or_default();
+        let path = match scope {
+            "memory_md" => self.paths.memory_file.clone(),
+            "topics" => self.paths.memory_topics_dir.join(format!("{slug}.md")),
+            "profiles" => self.paths.memory_profiles_dir.join(format!("{slug}.md")),
+            "daily" => self.paths.memory_daily_dir.join(format!("{slug}.md")),
+            _ => PathBuf::from(slug),
+        };
+        if path.exists() {
+            Ok(path)
+        } else {
+            Err(anyhow!("memory_ref not found: {memory_ref}"))
+        }
+    }
+
+    fn resolve_doc_ref(&self, doc_ref: &str) -> Result<(PathBuf, String, Option<String>)> {
+        let Some(rest) = doc_ref.strip_prefix("doc:") else {
+            bail!("invalid doc_ref: {doc_ref}");
+        };
+        let mut parts = rest.splitn(2, '/');
+        let library = parts.next().unwrap_or("workspace").to_string();
+        let doc_id = parts.next().unwrap_or_default();
+        let path = self.paths.knowledge_dir.join(format!("{doc_id}.md"));
+        if path.exists() {
+            Ok((path, doc_ref.to_string(), Some(library)))
+        } else {
+            Err(anyhow!("doc_ref not found: {doc_ref}"))
+        }
     }
 }
 
@@ -222,79 +437,184 @@ fn compact_excerpt(content: &str, query: &str) -> String {
 
 fn file_title(path: &Path) -> String {
     path.file_stem()
-        .or_else(|| path.file_name())
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
+        .and_then(|name| name.to_str())
+        .unwrap_or("document")
+        .to_string()
+}
+
+fn memory_scope_for_path(paths: &WorkspacePaths, path: &Path) -> &'static str {
+    if path.starts_with(&paths.memory_topics_dir) {
+        "topics"
+    } else if path.starts_with(&paths.memory_profiles_dir) {
+        "profiles"
+    } else if path.starts_with(&paths.memory_daily_dir) {
+        "daily"
+    } else {
+        "all"
+    }
+}
+
+fn memory_slug_for_path(paths: &WorkspacePaths, path: &Path) -> String {
+    let base = if path.starts_with(&paths.memory_topics_dir) {
+        &paths.memory_topics_dir
+    } else if path.starts_with(&paths.memory_profiles_dir) {
+        &paths.memory_profiles_dir
+    } else if path.starts_with(&paths.memory_daily_dir) {
+        &paths.memory_daily_dir
+    } else {
+        &paths.memory_dir
+    };
+    path.strip_prefix(base)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+        .trim_end_matches(".md")
+        .trim_end_matches(".txt")
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
         fs,
-        path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{RetrievalBridgeContextPlugin, RetrievalCollectionKind};
+    use serde_json::json;
+
+    use super::RetrievalBridgeContextPlugin;
     use crate::{
+        builtin::context::retrieval_types::{
+            KnowledgeGetRequest, KnowledgeSearchRequest, MemoryGetRequest, MemorySearchRequest,
+            MemorySearchScope, RetrievalMode,
+        },
         config::{WorkspaceDocument, WorkspacePaths},
-        core::{ContextPlugin, Plugin},
     };
 
     #[test]
-    fn distinguishes_memory_recall_from_knowledge_retrieval() {
-        let root = temp_path("retrieval-bridge");
+    fn memory_search_and_get_use_stable_refs_and_clip_ranges() {
+        let root = temp_path("retrieval-memory");
         let paths = WorkspacePaths::new(&root);
         fs::create_dir_all(&paths.memory_topics_dir).unwrap();
-        fs::create_dir_all(&paths.knowledge_dir).unwrap();
+        fs::write(
+            &paths.memory_file,
+            "## Stable Facts\nProject Alpha prefers Rust.\n",
+        )
+        .unwrap();
         fs::write(
             paths.memory_topics_dir.join("project-alpha.md"),
-            "Project Alpha prefers Rust for tools.",
-        )
-        .unwrap();
-        fs::write(
-            paths.knowledge_dir.join("api-guide.md"),
-            "The project API exposes a /health endpoint for checks.",
+            "Alpha line one\nAlpha line two\nAlpha line three\n",
         )
         .unwrap();
 
-        let bridge = RetrievalBridgeContextPlugin::new(&paths);
-        let memory = bridge
-            .recall_memory(
-                &WorkspaceDocument {
-                    path: paths.memory_file.clone(),
-                    content: "Stable fact: user prefers Rust.".into(),
+        let plugin = RetrievalBridgeContextPlugin::new(&paths);
+        let memory_document = WorkspaceDocument {
+            path: paths.memory_file.clone(),
+            content: fs::read_to_string(&paths.memory_file).unwrap(),
+        };
+
+        let results = plugin
+            .search_memory(
+                &memory_document,
+                &MemorySearchRequest {
+                    query: "Alpha".into(),
+                    top_k: 5,
+                    scope: MemorySearchScope::Topics,
+                    mode: RetrievalMode::Keyword,
+                    include_excerpt: true,
                 },
-                "Rust project",
-                4,
             )
             .unwrap();
-        let knowledge = bridge.retrieve_knowledge("health endpoint", 4).unwrap();
 
-        assert!(memory
-            .iter()
-            .all(|item| item.kind == RetrievalCollectionKind::Memory));
-        assert!(knowledge
-            .iter()
-            .all(|item| item.kind == RetrievalCollectionKind::Knowledge));
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].stable_ref, "mem:topics/project-alpha");
+        assert_eq!(
+            results[0].chunk_ref.as_deref(),
+            Some("chunk:memory/project-alpha/1")
+        );
+
+        let content = plugin
+            .get_memory(&MemoryGetRequest {
+                memory_ref: Some("mem:topics/project-alpha".into()),
+                path: None,
+                start_line: Some(2),
+                end_line: None,
+                max_lines: Some(5),
+            })
+            .unwrap();
+
+        assert_eq!(content.start_line, 2);
+        assert_eq!(content.end_line, 3);
+        assert_eq!(content.total_lines, 3);
+        assert!(!content.truncated);
+        assert!(content.content.contains("2| Alpha line two"));
+        assert!(content.content.contains("3| Alpha line three"));
 
         let _ = fs::remove_dir_all(root);
     }
 
     #[test]
-    fn retrieval_bridge_exposes_context_plugin_manifest_and_collections() {
-        let root = temp_path("retrieval-bridge-plugin");
+    fn knowledge_search_filters_by_library_and_path_prefix() {
+        let root = temp_path("retrieval-knowledge");
         let paths = WorkspacePaths::new(&root);
-        let bridge = RetrievalBridgeContextPlugin::new(&paths);
+        fs::create_dir_all(paths.knowledge_dir.join("rust/notes")).unwrap();
+        fs::create_dir_all(paths.knowledge_dir.join("ops/runbooks")).unwrap();
+        fs::write(
+            paths.knowledge_dir.join("rust/notes/ownership.md"),
+            "Rust ownership keeps memory safe.\n",
+        )
+        .unwrap();
+        fs::write(
+            paths.knowledge_dir.join("ops/runbooks/deploy.md"),
+            "Deploy checklist for production.\n",
+        )
+        .unwrap();
 
-        assert_eq!(bridge.manifest().id, "context.workspace.retrieval_bridge");
+        let plugin = RetrievalBridgeContextPlugin::new(&paths);
+        let results = plugin
+            .search_knowledge(&KnowledgeSearchRequest {
+                query: "ownership".into(),
+                top_k: 5,
+                library: Some("rust".into()),
+                libraries: Vec::new(),
+                path_prefix: Some("rust/notes".into()),
+                mode: RetrievalMode::Keyword,
+                metadata_filters: Some(json!({"path": "rust/notes"})),
+                include_excerpt: true,
+            })
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].stable_ref, "doc:rust/rust/notes/ownership");
+        assert_eq!(results[0].library.as_deref(), Some("rust"));
         assert_eq!(
-            ContextPlugin::collections(&bridge),
-            vec!["memory".to_string(), "knowledge".to_string()]
+            results[0].chunk_ref.as_deref(),
+            Some("chunk:rust/rust/notes/ownership/1")
         );
+
+        let content = plugin
+            .get_knowledge(&KnowledgeGetRequest {
+                doc_ref: Some("doc:rust/rust/notes/ownership".into()),
+                path: None,
+                library: None,
+                chunk_ref: None,
+                start_line: Some(1),
+                end_line: Some(10),
+                max_lines: None,
+            })
+            .unwrap();
+
+        assert_eq!(content.start_line, 1);
+        assert_eq!(content.end_line, 1);
+        assert_eq!(content.library.as_deref(), Some("rust"));
+        assert!(content
+            .content
+            .contains("1| Rust ownership keeps memory safe."));
+
+        let _ = fs::remove_dir_all(root);
     }
 
-    fn temp_path(prefix: &str) -> PathBuf {
+    fn temp_path(prefix: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time")

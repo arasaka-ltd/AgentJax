@@ -345,31 +345,31 @@
 - `docs/PROMPT_ASSEMBLY_SPEC.md`
 - `/Users/jaxlocke/rig-docs/pages/docs/quickstart/tools.mdx`
 
-- [ ] 将当前 builtin tools 从 `read_file` / `list_files` / `shell` 过渡到正式 file tool surface：
+- [x] 将当前 builtin tools 从 `read_file` / `list_files` / `shell` 过渡到正式 file tool surface：
   - `read`
   - `edit`
   - `write`
-- [ ] `read` 支持文本文件读取
-- [ ] `read` 支持图片文件读取
-- [ ] `read` 支持按 `start_line` / `end_line` 精确读取
-- [ ] `read` 输出显式包含 newline 风格：
+- [x] `read` 支持文本文件读取
+- [x] `read` 支持图片文件读取
+- [x] `read` 支持按 `start_line` / `end_line` 精确读取
+- [x] `read` 输出显式包含 newline 风格：
   - `lf`
   - `crlf`
   - `mixed`
-- [ ] `edit` 支持文本文件区间编辑：
+- [x] `edit` 支持文本文件区间编辑：
   - `start_line`
   - `start_column`
   - `end_line`
   - `end_column`
   - `new_text`
-- [ ] 明确并落地 `edit` 的区间语义：
+- [x] 明确并落地 `edit` 的区间语义：
   - start inclusive
   - end exclusive
-- [ ] `write` 支持创建文本文件并写入内容
-- [ ] `write` 支持 `create_dirs=true` 的 `mkdir -p` 语义
-- [ ] `write` / `edit` 对 `\n`、LF、CRLF 做统一 runtime 处理
-- [ ] 将新 file tools 接入 tool registry、prompt XML、tool calling loop
-- [ ] 为核心文件、memory、knowledge 编辑补最小 policy / regression 测试
+- [x] `write` 支持创建文本文件并写入内容
+- [x] `write` 支持 `create_dirs=true` 的 `mkdir -p` 语义
+- [x] `write` / `edit` 对 `\n`、LF、CRLF 做统一 runtime 处理
+- [x] 将新 file tools 接入 tool registry、prompt XML、tool calling loop
+- [x] 为核心文件、memory、knowledge 编辑补最小 policy / regression 测试
 
 ## Batch 10: Retrieval Tools Deep Implementation
 执行前先读：
@@ -380,46 +380,46 @@
 - `/Users/jaxlocke/rig-docs/pages/docs/quickstart/embeddings.mdx`
 - `/Users/jaxlocke/rig-docs/pages/docs/integrations.mdx`
 
-- [ ] 先对齐 Rig 已有抽象边界，避免重复造轮子：
+- [x] 先对齐 Rig 已有抽象边界，避免重复造轮子：
   - provider client / completion model 继续复用 Rig 风格抽象
   - embedding model 抽象尽量对齐 Rig
   - vector store / index 能力优先参考 Rig 的 `VectorStore` / `VectorStoreIndex` 心智模型
   - 不在 AgentJax 内部重复发明一套与 Rig 平行的 provider / embedding / vector index 基础接口
 
-- [ ] 定义并落地正式 retrieval tool surface：
+- [x] 定义并落地正式 retrieval tool surface：
   - `memory.search`
   - `memory.get`
   - `knowledge.search`
   - `knowledge.get`
-- [ ] `memory.search` 支持：
+- [x] `memory.search` 支持：
   - query
   - top_k
   - scope
   - mode
-- [ ] `memory.get` 支持：
+- [x] `memory.get` 支持：
   - `memory_ref`
   - path fallback
   - line-range 读取
-- [ ] `knowledge.search` 支持：
+- [x] `knowledge.search` 支持：
   - query
   - `library` / `libraries`
   - path prefix
   - mode
   - metadata filters
-- [ ] `knowledge.get` 支持：
+- [x] `knowledge.get` 支持：
   - `doc_ref`
   - path fallback
   - `library`
   - line-range / chunk inspect
-- [ ] 建立稳定引用层：
+- [x] 建立稳定引用层：
   - `memory_ref`
   - `doc_ref`
   - `chunk_ref`
-- [ ] 将当前 context assembly 自动检索逐步改成：
+- [x] 将当前 context assembly 自动检索逐步改成：
   - 可策略控制
   - 可由 Agent 显式调用
   - 不再把 retrieval 只做成隐式注入
-- [ ] 为 retrieval tools 补最小回归测试与 prompt 行为验证
+- [x] 为 retrieval tools 补最小回归测试与 prompt 行为验证
 
 ## Batch 11: Plugin Manager Deepening
 执行前先读：

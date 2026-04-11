@@ -133,7 +133,7 @@ XML 的意义就在这里。
   </knowledge>
 
   <tools>
-    <tool name="read_file">
+    <tool name="read">
       <description>Read a file from the workspace.</description>
       <when_to_use>When the user asks about file contents.</when_to_use>
       <arguments_schema>...</arguments_schema>
@@ -300,11 +300,23 @@ XML 的意义就在这里。
 
 ```xml
 <tools>
-  <tool name="shell">
-    <description>Run a shell command in the workspace.</description>
-    <when_to_use>Use for local inspection or implementation tasks.</when_to_use>
-    <when_not_to_use>Do not use for destructive commands unless explicitly authorized.</when_not_to_use>
-    <arguments_schema>{"cmd":"string"}</arguments_schema>
+  <tool name="read">
+    <description>Read a file from the workspace.</description>
+    <when_to_use>Use when file contents or line ranges are needed.</when_to_use>
+    <when_not_to_use>Do not use for file modifications.</when_not_to_use>
+    <arguments_schema>{"path":"string","start_line":"integer","end_line":"integer"}</arguments_schema>
+  </tool>
+  <tool name="edit">
+    <description>Apply a precise text range edit.</description>
+    <when_to_use>Use for targeted text insert/replace/delete operations.</when_to_use>
+    <when_not_to_use>Do not use to create new files.</when_not_to_use>
+    <arguments_schema>{"path":"string","start_line":"integer","start_column":"integer","end_line":"integer","end_column":"integer","new_text":"string"}</arguments_schema>
+  </tool>
+  <tool name="write">
+    <description>Create or overwrite a text file in the workspace.</description>
+    <when_to_use>Use when creating a file or replacing full file contents.</when_to_use>
+    <when_not_to_use>Do not use for partial edits when edit is sufficient.</when_not_to_use>
+    <arguments_schema>{"path":"string","content":"string","create_dirs":"boolean","overwrite":"boolean"}</arguments_schema>
   </tool>
 </tools>
 ```
