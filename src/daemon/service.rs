@@ -490,7 +490,13 @@ impl Daemon {
             .into_iter()
             .map(|plugin| PluginListItem {
                 id: plugin.plugin_id,
-                enabled: !matches!(plugin.status, PluginStatus::Stopped | PluginStatus::Failed),
+                enabled: matches!(
+                    plugin.status,
+                    PluginStatus::Loading
+                        | PluginStatus::Loaded
+                        | PluginStatus::Starting
+                        | PluginStatus::Running
+                ),
                 healthy: !matches!(plugin.status, PluginStatus::Failed),
                 capabilities: plugin.capabilities,
             })
@@ -517,13 +523,16 @@ impl Daemon {
         &self,
         params: PluginReloadRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        if !self
-            .plugin_descriptors()
-            .iter()
-            .any(|plugin| plugin.plugin_id == params.plugin_id)
-        {
-            return Err(plugin_not_found());
-        }
+        self.app
+            .plugin_manager
+            .reload(&params.plugin_id)
+            .map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::NotFound,
+                    format!("plugin reload failed: {error}"),
+                    false,
+                )
+            })?;
         self.push_log(format!("plugin reload requested: {}", params.plugin_id));
         Ok((
             self.serialize(PluginReloadResponse {
@@ -932,7 +941,7 @@ impl Daemon {
                     "sessions_total": session_count,
                     "tasks_total": task_count,
                     "schedules_total": schedule_count,
-                    "plugins_total": self.app.plugin_registry.plugin_count(),
+                    "plugins_total": self.app.plugin_manager.plugin_count(),
                 }),
                 gauges: json!({
                     "runtime_ready": self.store.ready(),
@@ -1461,21 +1470,8 @@ impl Daemon {
 
     fn plugin_descriptors(&self) -> Vec<PluginDescriptor> {
         self.app
-            .plugin_registry
-            .manifests()
-            .into_iter()
-            .map(|manifest| PluginDescriptor {
-                plugin_id: manifest.id,
-                version: manifest.version,
-                capabilities: manifest
-                    .capabilities
-                    .into_iter()
-                    .map(|capability| format!("{capability:?}"))
-                    .collect(),
-                api_version: self.app.runtime_config.plugin_api_version.clone(),
-                status: PluginStatus::Running,
-            })
-            .collect()
+            .plugin_manager
+            .descriptors(&self.app.runtime_config.plugin_api_version)
     }
 
     fn default_agent_descriptor(&self) -> Agent {

@@ -3,13 +3,13 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::builtin::tools::{ToolDescriptor, ToolRegistry};
 use crate::config::{AgentDefinition, RuntimeConfig};
 use crate::core::{
     EventBus, EventStore, HookBus, PluginRegistry, ResourceRegistry, SessionStore,
     WorkspaceRuntimeHost,
 };
 use crate::domain::{BillingRecord, PluginCapability, PluginManifest, Resource, UsageRecord};
-use crate::plugins::tools::{ToolDescriptor, ToolRegistry};
 
 #[derive(Clone)]
 pub struct WorkspaceHandle {
@@ -331,13 +331,13 @@ mod tests {
 
     use super::{Plugin, PluginHost, PluginRef};
     use crate::{
+        builtin::tools::ToolRegistry,
         config::{RuntimeConfig, RuntimePaths, WorkspaceConfig, WorkspaceDocument, WorkspacePaths},
         core::{
             EventBus, HookBus, PluginContext, PluginRegistry, ResourceRegistry,
             WorkspaceRuntimeHost,
         },
         domain::{HookPoint, Permission, PluginCapability, PluginManifest},
-        plugins::tools::ToolRegistry,
     };
 
     #[derive(Clone)]

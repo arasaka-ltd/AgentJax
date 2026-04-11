@@ -197,6 +197,67 @@
 - `neighbors`：拿命中块周边 chunk
 - `aggregate`：做结果归并、分组、证据汇总
 
+### 7.1 Agent-facing retrieval surface 不直接暴露 `RAG`
+需要明确一个架构边界：
+- `RAG Engine` 是底层 retrieval substrate
+- Agent-facing tool surface 应该面向 domain，而不是直接面向 substrate
+
+也就是说：
+- `RAG` 是实现层
+- `Memory` / `Knowledge` 是 Agent 的认知层
+
+Agent 直接看到的 retrieval tools 应优先表现为：
+- `memory.search`
+- `memory.get`
+- `knowledge.search`
+- `knowledge.get`
+
+不建议第一阶段直接暴露：
+- `rag.search`
+- `rag.get`
+
+原因：
+- Agent 关心的是“我要查长期记忆还是领域知识”
+- 而不是“我要调用底层 retrieval substrate 的哪一层”
+- 这样也允许底层 RAG backend、collection 拆分、索引策略演化而不破坏 tool surface
+
+### 7.2 `search` 与 `get` 必须分离
+retrieval tool surface 至少应分成两步：
+- `search`：负责找候选、打分、给摘要、给引用
+- `get`：负责按稳定引用或路径读取正文或精确片段
+
+不要让一次 `search` 同时承担“找候选”和“大段取正文”两种职责。
+否则：
+- prompt 体积会失控
+- agent 会跳过筛选过程
+- tool 协议会变得模糊
+
+### 7.3 稳定引用优先于路径拼接
+`search` 结果应尽量返回稳定引用，而不只是裸路径。
+
+建议至少有：
+- `memory_ref`
+- `doc_ref`
+- `chunk_ref`
+
+这样做的价值：
+- `get` 可以稳定消费 `search` 结果
+- 模型不必手工拼路径
+- 为后续 reindex、path migration、chunk inspect 留出稳定层
+
+### 7.4 Knowledge 范围收敛优先暴露 `library`
+对 Agent 暴露搜索范围时，建议优先使用：
+- `library`
+- `libraries`
+- `path_prefix`
+
+而不是一开始就把内部 `collection` 直接暴露出去。
+
+推荐分层：
+- `library`：Agent 认知中的知识库名，例如 `rust`、`blender`、`project-docs`
+- `collection`：RAG Engine 内部检索单位
+- `path`：具体文档路径
+
 ---
 ## 8. Knowledge Systems
 `Knowledge Systems` 是构建在 `RAG` 之上的领域化知识层。
@@ -213,6 +274,11 @@
 - 一套 schema / metadata 约束
 - 一套领域化 ingest 与 retrieval defaults
 - 一套来源治理与更新策略
+
+在 Agent-facing surface 上，`Knowledge System` 还应表现为：
+- 一组稳定可引用的 `library`
+- 每个 `library` 下的一组文档与索引
+- 一套面向 Agent 的检索默认范围与读取策略
 
 它不是 `Memory`，因为它不要求内容必须“长期影响 agent 行为”。
 
@@ -241,24 +307,106 @@
 - `Memory` 额外定义更严格的进入条件与生命周期
 - `Memory` 的价值不在“搜得到”，而在“该不该写进去”
 
+在 Agent-facing tool surface 上，这层能力应优先体现为：
+- `memory.search`
+- `memory.get`
+
+而不是让 Agent 直接操心底层 memory collections 的内部结构。
+
+### 9.1 Memory 与 Knowledge 的 Agent 使用差异
+优先用 `memory.*` 的场景：
+- 查询用户偏好
+- 查询长期决策
+- 查询稳定规则
+- 查询人物 / 组织画像
+- 查询会影响未来行为的持久约束
+
+优先用 `knowledge.*` 的场景：
+- 查询技术手册
+- 查询产品 / API 文档
+- 查询项目资料
+- 查询外部参考资料
+- 查询需要证据支撑的领域知识
+
+不能接受的方向：
+- 把 `memory` 当任意知识库
+- 把 `knowledge` 当人格 / 行为约束仓库
+- 让 Agent 在没有缩小范围时反复全文读取大型知识库
+
 ---
-## 10. Memory 的四个核心策略
-### 10.1 Promotion Policy
+## 10. Retrieval Tool Surface 的正式方向
+为了和上述边界保持一致，正式建议如下：
+
+### 10.1 第一阶段最小工具闭环
+先定义四个 Agent-facing retrieval tools：
+- `memory.search`
+- `memory.get`
+- `knowledge.search`
+- `knowledge.get`
+
+其中：
+- `search` 负责候选召回
+- `get` 负责正文或精确片段读取
+
+### 10.2 `memory.search` 的最小能力
+至少应支持：
+- query
+- top_k
+- scope
+- retrieval mode
+- excerpt 返回
+
+### 10.3 `memory.get` 的最小能力
+至少应支持：
+- 按 `memory_ref` 读取
+- 按路径读取
+- 按 `start_line` / `end_line` 精确读取 Markdown 行段
+- token / line budget 保护
+
+### 10.4 `knowledge.search` 的最小能力
+至少应支持：
+- query
+- top_k
+- `library` / `libraries`
+- path prefix 限制
+- retrieval mode
+- metadata filters
+
+### 10.5 `knowledge.get` 的最小能力
+至少应支持：
+- 按 `doc_ref` 读取
+- 按路径读取
+- 按 `library` 缩小定位范围
+- 按行号或 chunk 引用读取片段
+
+### 10.6 后续高级能力应渐进扩展
+不要求第一阶段把所有高级 RAG 能力都直接暴露给 Agent。
+后续可以在不破坏主协议的前提下逐步增加：
+- rerank
+- neighbors
+- inspect
+- aggregate
+- citations / spans
+- evidence pack
+
+---
+## 11. Memory 的四个核心策略
+### 11.1 Promotion Policy
 什么能进长期记忆。
 
-### 10.2 Conflict Policy
+### 11.2 Conflict Policy
 新证据和旧记忆冲突时如何处理。
 
-### 10.3 Freshness Policy
+### 11.3 Freshness Policy
 哪些记忆会过期、降权、待验证。
 
-### 10.4 Behavioral Relevance Policy
+### 11.4 Behavioral Relevance Policy
 这条记忆会不会影响未来行为；不会就别进。
 
 这四个策略决定 `Memory` 像不像脑子，而不是像垃圾桶。
 
 ---
-## 11. 写入成本原则
+## 12. 写入成本原则
 必须明确：
 **Memory 的写入应该比 RAG 的写入更贵。**
 
@@ -270,7 +418,7 @@
 否则最后所谓“记忆系统”只是换了名字的 dump 库。
 
 ---
-## 12. 最小默认实现建议
+## 13. 最小默认实现建议
 核心 `RAG` 子系统内建：
 - collection abstraction
 - FTS / keyword retrieval
@@ -292,13 +440,14 @@
 - custom reranker plugin
 
 ---
-## 13. 与其他规范的关系
+## 14. 与其他规范的关系
 - `docs/LCM_CONTEXT_ENGINE.md`：定义会话连续性，不负责知识库检索
 - `docs/WORKSPACE_AND_CONFIG_SPEC.md`：定义 `knowledge/` 与 `memory/` 在工作区中的布局
 - `docs/PLUGIN_SDK.md`：定义 `RAG`、`Knowledge`、`Memory` 的插件与资源边界
+- `docs/RETRIEVAL_TOOL_SPEC.md`：定义 Agent-facing retrieval tools 的协议与使用策略
 
 ---
-## 14. 硬结论
+## 15. 硬结论
 AgentJax 应明确采用以下分层：
 - `LCM / Context Engine`：保证无限对话连续性
 - `RAG Engine`：提供通用检索基础设施

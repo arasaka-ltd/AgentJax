@@ -3,6 +3,7 @@ pub mod event_bus;
 pub mod hook_bus;
 pub mod persistence;
 pub mod plugin;
+pub mod plugin_manager;
 pub mod registry;
 pub mod reload;
 pub mod resource_registry;
@@ -15,8 +16,9 @@ pub use hook_bus::HookBus;
 pub use persistence::{EventStore, PersistenceStore, SessionRecord, SessionStore};
 pub use plugin::{
     BackendPlugin, BillingPlugin, ContextPlugin, Plugin, PluginContext, PluginHost, PluginRef,
-    ProviderPlugin, ResourceProviderPlugin, StoragePlugin,
+    ProviderPlugin, ProviderPluginRef, ResourceProviderPlugin, StoragePlugin,
 };
+pub use plugin_manager::{PluginManager, PluginManagerCandidate};
 pub use registry::PluginRegistry;
 pub use reload::{ReloadInstruction, ReloadPlan};
 pub use resource_registry::ResourceRegistry;

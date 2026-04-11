@@ -7,10 +7,10 @@ use tokio::{
 };
 
 use crate::{
+    builtin::tools::{ToolDescriptor, ToolOutput, ToolPlugin},
     core::Plugin,
     domain::ToolCall,
     domain::{Permission, PluginCapability, PluginManifest, ToolCapability},
-    plugins::tools::{ToolDescriptor, ToolOutput, ToolPlugin},
 };
 
 #[derive(Debug, Clone, Default)]

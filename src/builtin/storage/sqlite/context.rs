@@ -1,32 +1,32 @@
-pub use super::sqlite_backend::SqliteSessionStore;
+pub use super::backend::SqliteEventStore;
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use crate::{
-    core::{Plugin, SessionStore, StoragePlugin},
+    core::{EventStore, Plugin, StoragePlugin},
     domain::{
         Permission, PluginCapability, PluginManifest, RagCapability, ResourceDescriptor, ResourceId,
     },
 };
 
 #[derive(Debug, Clone, Default)]
-pub struct SqliteSessionStorePlugin {
-    store: Option<SqliteSessionStore>,
+pub struct SqliteContextStorePlugin {
+    store: Option<SqliteEventStore>,
 }
 
-impl SqliteSessionStorePlugin {
-    pub fn new(store: SqliteSessionStore) -> Self {
+impl SqliteContextStorePlugin {
+    pub fn new(store: SqliteEventStore) -> Self {
         Self { store: Some(store) }
     }
 }
 
 #[async_trait]
-impl Plugin for SqliteSessionStorePlugin {
+impl Plugin for SqliteContextStorePlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
-            id: "storage.sqlite.sessions".into(),
+            id: "storage.sqlite.runtime_events".into(),
             version: "0.1.0".into(),
             capabilities: vec![PluginCapability::Rag(RagCapability::BackendDriver)],
             config_schema: None,
@@ -34,38 +34,36 @@ impl Plugin for SqliteSessionStorePlugin {
             dependencies: Vec::new(),
             optional_dependencies: Vec::new(),
             provided_resources: vec![ResourceDescriptor {
-                resource_id: ResourceId("store:session".into()),
-                kind: "sqlite.session_store".into(),
-                description: Some("SQLite-backed session persistence store".into()),
+                resource_id: ResourceId("store:runtime_events".into()),
+                kind: "sqlite.event_store".into(),
+                description: Some("SQLite-backed runtime event persistence store".into()),
             }],
             hooks: Vec::new(),
         }
     }
 }
 
-impl StoragePlugin for SqliteSessionStorePlugin {
-    fn session_store(&self) -> Option<Arc<dyn SessionStore>> {
+impl StoragePlugin for SqliteContextStorePlugin {
+    fn event_store(&self) -> Option<Arc<dyn EventStore>> {
         self.store
             .as_ref()
             .cloned()
-            .map(|store| Arc::new(store) as Arc<dyn SessionStore>)
+            .map(|store| Arc::new(store) as Arc<dyn EventStore>)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
+        builtin::storage::sqlite::{SqliteContextStorePlugin, SqlitePersistence},
         config::{RuntimeConfig, RuntimePaths, WorkspaceConfig, WorkspacePaths},
         core::StoragePlugin,
-        plugins::storage::{
-            sqlite_backend::SqlitePersistence, sqlite_sessions::SqliteSessionStorePlugin,
-        },
     };
 
     #[test]
-    fn sqlite_session_store_plugin_exposes_storage_handle() {
+    fn sqlite_event_store_plugin_exposes_storage_handle() {
         let root = std::env::temp_dir().join(format!(
-            "agentjax-sqlite-session-plugin-{}",
+            "agentjax-sqlite-context-plugin-{}",
             chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
         ));
         let runtime = RuntimeConfig::new(
@@ -77,8 +75,8 @@ mod tests {
             ),
         );
         let persistence = SqlitePersistence::open(&runtime).unwrap();
-        let plugin = SqliteSessionStorePlugin::new(persistence.session_store());
+        let plugin = SqliteContextStorePlugin::new(persistence.event_store());
 
-        assert!(plugin.session_store().is_some());
+        assert!(plugin.event_store().is_some());
     }
 }

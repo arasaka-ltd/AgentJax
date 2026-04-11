@@ -156,6 +156,22 @@ workspace/
 - `scratch/`：临时草稿、待筛选内容
 ### 4.3 `knowledge/`
 存放通用知识域或领域知识库，例如项目资料、产品文档、API 文档、笔记库、代码知识块。
+推荐按 Agent 可理解的 `library` 分层组织，例如：
+```text
+knowledge/
+  rust/
+    book/
+    reference/
+  blender/
+    manual/
+    api/
+  project-docs/
+    architecture/
+    runbooks/
+```
+
+这里的 `library` 是 Agent-facing 的知识库命名层。
+它不必与底层 RAG collection 一一对应，但应保持稳定、可理解、可在 tool 参数中直接引用。
 ### 4.4 `prompts/`
 存放可复用 prompt blocks、模板、辅助说明材料。
 ---
@@ -202,6 +218,19 @@ workspace/
 - `memory/` 面向 durable agent knowledge，只收会影响未来行为的稳定内容
 - `knowledge/` 的召回目标是“找到相关证据”
 - `memory/` 的召回目标是“拿回长期有效的认知约束”
+
+### 5.6 与 Retrieval Tool Surface 的对应关系
+为了让 Agent 明确区分“查长期记忆”和“查领域知识”，建议 retrieval tool surface 直接映射这两个域：
+- `memory.search`
+- `memory.get`
+- `knowledge.search`
+- `knowledge.get`
+
+其中：
+- `memory.search/get` 主要面向 `MEMORY.md` 与 `memory/**`
+- `knowledge.search/get` 主要面向 `knowledge/<library>/**`
+
+这层映射应稳定存在，避免让 Agent 直接暴露到底层 `RAG` collection 细节。
 ---
 ## 6. Runtime 配置目录规范
 ### 6.1 配置目录不在工作区内

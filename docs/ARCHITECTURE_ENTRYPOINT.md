@@ -93,6 +93,33 @@ AgentJax 当前的正式架构规范由以下文档组成。
   - knowledge system 的领域化组织方式
   - memory system 作为基于 RAG 的特化长期语义层
   - promotion / conflict / freshness / behavioral relevance policy
+### Spec 6.1：Retrieval Tools
+- `docs/RETRIEVAL_TOOL_SPEC.md`
+- 作用：定义 Agent-facing retrieval tool surface
+- 包括：
+  - 为什么不直接把 `RAG` 暴露成 agent tool
+  - `memory.search` / `memory.get`
+  - `knowledge.search` / `knowledge.get`
+  - `search` 与 `get` 的职责分离
+  - `library` / `path` / stable ref 的参数边界
+### Spec 6.2：File Tools
+- `docs/FILE_TOOLS_SPEC.md`
+- 作用：定义 Agent-facing 文件操作工具协议
+- 包括：
+  - `read` / `edit` / `write`
+  - 文本与图片读取
+  - 行号 / 列号 / 精确区间编辑
+  - `\n` 与 LF/CRLF 处理
+  - `mkdir -p` 风格写入
+  - 核心文件、memory、knowledge 的编辑边界
+### Plan A：`src/plugins` Refactor
+- `docs/PLUGIN_REFACTOR_PLAN.md`
+- 作用：治理 builtin runtime 与真实插件系统的边界
+- 包括：
+  - builtin tools / storage / context 回归本体代码
+  - 真正插件改为一插件一目录
+  - `PluginManager` 的职责、状态机与启停治理
+  - `Application::new()` 与 daemon plugin API 的迁移方向
 ### Spec 7：Channels / Daemon / Client
 - `docs/CHANNELS_DAEMON_CLIENT_SPEC.md`
 - 作用：定义 daemon/client、surface/channel/transport、IPC/WebSocket API 的正式分层
@@ -191,10 +218,31 @@ src/
   main.rs
   app.rs
   bootstrap.rs
+  builtin/
+    mod.rs
+    tools/
+      mod.rs
+      read_file.rs
+      list_files.rs
+      shell.rs
+    storage/
+      mod.rs
+      sqlite/
+        mod.rs
+        backend.rs
+        sessions.rs
+        context.rs
+    context/
+      mod.rs
+      workspace_identity.rs
+      task_state.rs
+      summary_loader.rs
+      retrieval_bridge.rs
   config/
     mod.rs
     loader.rs
     paths.rs
+    plugins.rs
     runtime.rs
     workspace.rs
   core/
@@ -202,6 +250,7 @@ src/
     runtime.rs
     workspace_runtime.rs
     plugin.rs
+    plugin_manager.rs
     registry.rs
     resource_registry.rs
     hook_bus.rs
@@ -240,39 +289,18 @@ src/
     schema.rs
   plugins/
     mod.rs
-    providers/
+    openai/
       mod.rs
-      openai.rs
-      embedding.rs
-      tts.rs
-      st.rs
-    storage/
+      plugin.rs
+    telegram/
       mod.rs
-      sqlite_sessions.rs
-      sqlite_context.rs
-    context/
+      plugin.rs
+    local_scheduler/
       mod.rs
-      workspace_identity.rs
-      task_state.rs
-      summary_loader.rs
-      retrieval_bridge.rs
-    tools/
+      plugin.rs
+    static_nodes/
       mod.rs
-      read_file.rs
-      list_files.rs
-      shell.rs
-    channels/
-      mod.rs
-      telegram.rs
-    scheduler/
-      mod.rs
-      local_scheduler.rs
-    billing/
-      mod.rs
-      estimator.rs
-    nodes/
-      mod.rs
-      static_registry.rs
+      plugin.rs
   infra/
     mod.rs
     fs.rs
@@ -315,15 +343,11 @@ src/
 - expansion
 - resume pack
 ### `plugins/`
-负责所有具体实现：
-- providers
-- storage
-- context plugins
-- tools
-- channels
-- scheduler
-- billing
-- nodes
+负责真正插件实现：
+- external providers
+- external channels
+- schedulers / nodes 等可独立启停模块
+Builtin tools / storage / context internals 不再放在这里。
 ### `infra/`
 负责基础设施：
 - 文件系统

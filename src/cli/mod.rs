@@ -16,7 +16,7 @@ use crate::{
     bootstrap::bootstrap_application,
     config::{ConfigLoader, InitMode, LlmProviderConfig},
     daemon::Daemon,
-    plugins::providers::openai::{OpenAiModelCatalog, OpenAiProviderAdapter},
+    plugins::openai::{OpenAiModelCatalog, OpenAiProviderAdapter},
     transport::{unix::UnixSocketClient, unix::UnixSocketServer, websocket::WebSocketServer},
 };
 

@@ -2,10 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     api::SessionMessage,
+    builtin::tools::ToolDescriptor,
     config::{WorkspaceDocument, WorkspaceIdentityPack},
     context_engine::AssembledContext,
     domain::{ContextBlock, ContextBlockKind, Freshness},
-    plugins::tools::ToolDescriptor,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -538,10 +538,10 @@ mod tests {
     };
     use crate::{
         api::{SessionMessage, SessionMessageAnnotation},
+        builtin::tools::ToolDescriptor,
         config::{WorkspaceDocument, WorkspaceIdentityPack},
         context_engine::assembler::{AssembledContext, TokenBreakdown},
         domain::{ContextBlock, ContextBlockKind, ContextSource},
-        plugins::tools::ToolDescriptor,
     };
 
     #[test]

@@ -4,20 +4,20 @@ use serde_json::json;
 use tokio::fs;
 
 use crate::{
+    builtin::tools::{ToolDescriptor, ToolOutput, ToolPlugin},
     core::Plugin,
     domain::ToolCall,
     domain::{Permission, PluginCapability, PluginManifest, ToolCapability},
-    plugins::tools::{ToolDescriptor, ToolOutput, ToolPlugin},
 };
 
 #[derive(Debug, Clone, Default)]
-pub struct ReadFileToolPlugin;
+pub struct ListFilesToolPlugin;
 
 #[async_trait]
-impl Plugin for ReadFileToolPlugin {
+impl Plugin for ListFilesToolPlugin {
     fn manifest(&self) -> PluginManifest {
         PluginManifest {
-            id: "tool.builtin.read_file".into(),
+            id: "tool.builtin.list_files".into(),
             version: "0.1.0".into(),
             capabilities: vec![PluginCapability::Tool(ToolCapability::Tool)],
             config_schema: None,
@@ -31,20 +31,20 @@ impl Plugin for ReadFileToolPlugin {
 }
 
 #[async_trait]
-impl ToolPlugin for ReadFileToolPlugin {
+impl ToolPlugin for ListFilesToolPlugin {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            name: "read_file".into(),
-            description: "Read a UTF-8 text file from the local workspace".into(),
-            when_to_use: "Use when the user asks for exact file contents or code inspection."
+            name: "list_files".into(),
+            description: "List files in a local directory".into(),
+            when_to_use: "Use when the user asks what files or folders exist in a path.".into(),
+            when_not_to_use: "Do not use when file contents are needed; use read_file instead."
                 .into(),
-            when_not_to_use: "Do not use for directory listing or command execution.".into(),
             arguments_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Absolute or workspace-relative path to a UTF-8 text file."
+                        "description": "Absolute or workspace-relative directory path."
                     }
                 },
                 "required": ["path"]
@@ -59,11 +59,16 @@ impl ToolPlugin for ReadFileToolPlugin {
             .args
             .get("path")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| anyhow!("read_file requires args.path"))?;
-        let content = fs::read_to_string(path).await?;
+            .ok_or_else(|| anyhow!("list_files requires args.path"))?;
+        let mut entries = fs::read_dir(path).await?;
+        let mut items = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            items.push(entry.path().display().to_string());
+        }
+        items.sort();
         Ok(ToolOutput {
-            content,
-            metadata: json!({ "path": path }),
+            content: items.join("\n"),
+            metadata: json!({ "path": path, "count": items.len() }),
         })
     }
 }

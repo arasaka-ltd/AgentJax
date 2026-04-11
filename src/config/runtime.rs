@@ -1,12 +1,15 @@
 use serde::{Deserialize, Serialize};
 
-use super::{LlmProviderConfig, OpenAiProviderConfig, RuntimePaths, WorkspaceConfig};
+use super::{
+    LlmProviderConfig, OpenAiProviderConfig, PluginsConfig, RuntimePaths, WorkspaceConfig,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeConfig {
     pub app_name: String,
     pub runtime_paths: RuntimePaths,
     pub workspace: WorkspaceConfig,
+    pub plugins: PluginsConfig,
     pub api_version: String,
     pub daemon_version: String,
     pub agent_runtime: AgentRuntimeConfig,
@@ -27,6 +30,7 @@ impl RuntimeConfig {
             app_name: app_name.into(),
             runtime_paths,
             workspace,
+            plugins: PluginsConfig::default(),
             api_version: "v1".into(),
             daemon_version: env!("CARGO_PKG_VERSION").into(),
             agent_runtime: AgentRuntimeConfig::default(),

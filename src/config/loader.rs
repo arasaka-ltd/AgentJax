@@ -7,8 +7,9 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AgentDefinition, ConfigRoot, LlmProviderConfig, ModelCatalogSnapshot, RuntimeConfig,
-    RuntimePaths, WorkspaceConfig, WorkspaceDocument, WorkspaceIdentityPack, WorkspacePaths,
+    AgentDefinition, ConfigRoot, LlmProviderConfig, ModelCatalogSnapshot, PluginsConfig,
+    RuntimeConfig, RuntimePaths, WorkspaceConfig, WorkspaceDocument, WorkspaceIdentityPack,
+    WorkspacePaths,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -72,6 +73,20 @@ struct DaemonTomlConfig {
     websocket_bind: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct PluginsTomlConfig {
+    #[serde(default)]
+    enabled: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    disabled: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    config_refs: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    policy_flags: std::collections::BTreeMap<String, bool>,
+    #[serde(default)]
+    reload_hints: std::collections::BTreeMap<String, String>,
+}
+
 impl ConfigLoader {
     pub fn load_default() -> Result<LoadedConfig> {
         Self::load_from_roots("./config", "./runtime", "./workspace")
@@ -110,6 +125,7 @@ impl ConfigLoader {
             },
         };
         write_toml_if_missing(&config_root.providers_config, &providers)?;
+        write_toml_if_missing(&config_root.plugins_config, &PluginsTomlConfig::default())?;
 
         let models = ModelsTomlConfig {
             defaults: ModelsDefaultsConfig {
@@ -160,6 +176,8 @@ impl ConfigLoader {
         let core: CoreTomlConfig = toml::from_str(&fs::read_to_string(&config_root.core_config)?)?;
         let providers: ProvidersTomlConfig =
             toml::from_str(&fs::read_to_string(&config_root.providers_config)?)?;
+        let plugins: PluginsTomlConfig =
+            toml::from_str(&fs::read_to_string(&config_root.plugins_config)?)?;
         let models: ModelsTomlConfig =
             toml::from_str(&fs::read_to_string(&config_root.models_config)?)?;
 
@@ -186,6 +204,13 @@ impl ConfigLoader {
             provider_id: models.defaults.provider_id.clone(),
             model: models.defaults.model_id.clone(),
             ..runtime_config.agent_runtime.default_agent
+        };
+        runtime_config.plugins = PluginsConfig {
+            enabled: plugins.enabled,
+            disabled: plugins.disabled,
+            config_refs: plugins.config_refs,
+            policy_flags: plugins.policy_flags,
+            reload_hints: plugins.reload_hints,
         };
         runtime_config.agent_runtime.llm.default_provider_id = providers.llm.default_provider_id;
         runtime_config.agent_runtime.llm.providers = providers.llm.providers;

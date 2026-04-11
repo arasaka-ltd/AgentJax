@@ -523,82 +523,98 @@ Skill 应升级为结构化协议，而不是单纯 `skills/foo.md`。
 ### 当前 -> 目标
 - `src/agent/builder.rs`
   - -> `src/core/runtime.rs`
-  - -> `src/plugins/llm/rig_backend.rs`
+  - -> `src/plugins/openai/plugin.rs`
 - `src/agent/context.rs`
   - -> `src/core/context_engine.rs`
-  - -> `src/plugins/context/*`
+  - -> `src/builtin/context/*`
 - `src/agent/memory.rs`
-  - -> `src/plugins/context/system_memory.rs`
-  - -> `src/plugins/context/user_memory.rs`
+  - -> `src/builtin/context/retrieval_bridge.rs`
 - `src/session/sqlite.rs`
-  - -> `src/plugins/storage/sqlite_sessions.rs`
+  - -> `src/builtin/storage/sqlite/sessions.rs`
 - `src/tools/*`
-  - -> `src/plugins/tools/*`
+  - -> `src/builtin/tools/*`
 - `src/adapters/telegram.rs`
-  - -> `src/plugins/channels/telegram.rs`
+  - -> `src/plugins/telegram/plugin.rs`
 - `src/infra/llm.rs`
-  - -> `src/plugins/providers/openai.rs`
-  - 或 `src/plugins/llm/rig_openai.rs`
+  - -> `src/plugins/openai/plugin.rs`
 ---
 ## 11. 推荐目录结构
 ```text
 src/
   main.rs
   app.rs
-  config.rs
-  core/
+  bootstrap.rs
+  builtin/
     mod.rs
-    plugin.rs
-    registry.rs
-    runtime.rs
-    workspace.rs
-    context_engine.rs
-    resource_registry.rs
-    hook_bus.rs
-    event_bus.rs
-  domain/
-    mod.rs
-    agent.rs
-    message.rs
-    event.rs
-    conversation.rs
-    workspace.rs
-    tool.rs
-    resource.rs
-    plugin.rs
-  plugins/
-    mod.rs
-    providers/
-      mod.rs
-      openai.rs
-      st_openai.rs
-      tts_openai.rs
-    llm/
-      mod.rs
-      rig_backend.rs
-    storage/
-      mod.rs
-      sqlite_sessions.rs
-    context/
-      mod.rs
-      system_memory.rs
-      user_memory.rs
-      workspace_files.rs
-      session_history.rs
     tools/
       mod.rs
       read_file.rs
       list_files.rs
       shell.rs
-    channels/
+    storage/
       mod.rs
-      telegram.rs
-    skills/
+      sqlite/
+        mod.rs
+        backend.rs
+        sessions.rs
+        context.rs
+    context/
       mod.rs
-      manifest_loader.rs
-    hooks/
+      workspace_identity.rs
+      task_state.rs
+      summary_loader.rs
+      retrieval_bridge.rs
+  config/
+    mod.rs
+    loader.rs
+    paths.rs
+    plugins.rs
+    provider.rs
+    runtime.rs
+    workspace.rs
+  core/
+    mod.rs
+    plugin.rs
+    plugin_manager.rs
+    registry.rs
+    runtime.rs
+    workspace_runtime.rs
+    resource_registry.rs
+    hook_bus.rs
+    event_bus.rs
+  domain/
+    mod.rs
+    object_meta.rs
+    agent.rs
+    session.rs
+    turn.rs
+    task.rs
+    event.rs
+    context.rs
+    tool.rs
+    resource.rs
+    plugin.rs
+    usage.rs
+    billing.rs
+  context_engine/
+    mod.rs
+    engine.rs
+    assembler.rs
+    prompt.rs
+  plugins/
+    mod.rs
+    openai/
       mod.rs
-      tracing_hooks.rs
+      plugin.rs
+    telegram/
+      mod.rs
+      plugin.rs
+    local_scheduler/
+      mod.rs
+      plugin.rs
+    static_nodes/
+      mod.rs
+      plugin.rs
 ```
 ---
 ## 12. MVP 阶段建议收敛范围
@@ -615,9 +631,9 @@ src/
 - `ToolPlugin` / `ContextPlugin` / `ChannelPlugin` / `AgentBackendPlugin` / `SessionStore` trait
 ### 12.2 Phase 2：适配当前已有实现
 把已有代码挂进去：
-- `SqliteSessionStore` -> storage plugin
-- `FsContextProvider` -> context plugin
-- `RigAgentRuntime` -> backend plugin
+- `SqliteSessionStore` -> builtin storage substrate
+- `Workspace / retrieval context providers` -> builtin context providers
+- `OpenAI provider` -> real provider plugin
 - `read_file` / `list_files` / `shell_exec` -> tool plugins
 - Telegram adapter -> channel plugin
 ### 12.3 Phase 3：补资源统一层

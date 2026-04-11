@@ -13,6 +13,7 @@ use serde_json::Value;
 
 use crate::{
     api::SessionMessage,
+    builtin::storage::sqlite::SqlitePersistence,
     config::RuntimeConfig,
     core::{EventStore, PersistenceStore, SessionRecord, SessionStore},
     daemon::task_store::{initial_task_record, StoredTaskRecord, TaskStore},
@@ -20,7 +21,6 @@ use crate::{
         EventSource, EventType, ObjectMeta, ResumePack, RuntimeEvent, Session, SessionMode,
         SessionStatus, Task, TaskCheckpoint, TaskPhase, TaskTimelineEntry,
     },
-    plugins::storage::sqlite_backend::SqlitePersistence,
 };
 
 pub struct DaemonStore {
@@ -285,8 +285,8 @@ impl DaemonStore {
 
 #[derive(Clone)]
 struct SqlitePersistenceBridge {
-    session_store: crate::plugins::storage::sqlite_sessions::SqliteSessionStore,
-    event_store: crate::plugins::storage::sqlite_context::SqliteEventStore,
+    session_store: crate::builtin::storage::sqlite::SqliteSessionStore,
+    event_store: crate::builtin::storage::sqlite::SqliteEventStore,
 }
 
 impl SqlitePersistenceBridge {

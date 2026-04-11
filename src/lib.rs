@@ -1,6 +1,7 @@
 pub mod api;
 pub mod app;
 pub mod bootstrap;
+pub mod builtin;
 pub mod cli;
 pub mod config;
 pub mod context_engine;

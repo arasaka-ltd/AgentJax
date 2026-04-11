@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 
 use anyhow::{anyhow, Result};
 
+use crate::builtin::tools::ToolPlugin;
 use crate::core::plugin::{
     BackendPluginRef, ContextPluginRef, PluginRef, ProviderPluginRef, StoragePluginRef,
 };
 use crate::domain::{PluginCapability, PluginManifest};
-use crate::plugins::tools::ToolPlugin;
 
 #[derive(Default, Clone)]
 pub struct PluginRegistry {
@@ -140,11 +140,11 @@ mod tests {
 
     use super::PluginRegistry;
     use crate::{
+        builtin::tools::{ToolDescriptor, ToolOutput, ToolPlugin},
         core::{ContextPlugin, Plugin, PluginRef, StoragePlugin},
         domain::{
             ContextCapability, Permission, PluginCapability, PluginManifest, ProviderCapability,
         },
-        plugins::tools::{ToolDescriptor, ToolOutput, ToolPlugin},
     };
 
     #[derive(Clone)]

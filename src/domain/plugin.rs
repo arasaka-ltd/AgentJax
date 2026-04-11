@@ -185,10 +185,13 @@ pub struct HookInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PluginStatus {
+    Discovered,
+    Disabled,
+    Loading,
     Loaded,
-    Initialized,
+    Starting,
     Running,
-    Draining,
+    Stopping,
     Stopped,
     Failed,
 }

@@ -2,24 +2,17 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::builtin::tools::ToolRegistry;
 use crate::config::{ConfigRoot, RuntimeConfig, WorkspaceIdentityPack};
 use crate::context_engine::{ContextEngine, WorkspaceContextEngine};
 use crate::core::{
-    ApplicationRuntime, ContextPlugin, EventBus, HookBus, PluginHost, PluginRef, PluginRegistry,
-    ResourceProviderPlugin, ResourceRegistry, RuntimeHost, StoragePlugin, WorkspaceRuntime,
-    WorkspaceRuntimeHost,
+    ApplicationRuntime, EventBus, HookBus, PluginHost, PluginManager, PluginManagerCandidate,
+    PluginRef, PluginRegistry, ResourceProviderPlugin, ResourceRegistry, RuntimeHost,
+    WorkspaceRuntime, WorkspaceRuntimeHost,
 };
-use crate::plugins::context::{
-    RetrievalBridgeContextPlugin, SummaryLoaderContextPlugin, TaskStateContextPlugin,
-    WorkspaceIdentityContextPlugin,
-};
-use crate::plugins::providers::openai::OpenAiProviderPlugin;
-use crate::plugins::storage::{
-    sqlite_backend::SqlitePersistence, sqlite_context::SqliteContextStorePlugin,
-    sqlite_sessions::SqliteSessionStorePlugin,
-};
-use crate::plugins::tools::{
-    ListFilesToolPlugin, ReadFileToolPlugin, ShellToolPlugin, ToolPlugin, ToolRegistry,
+use crate::plugins::{
+    local_scheduler::LocalSchedulerPlugin, openai::OpenAiProviderPlugin,
+    static_nodes::StaticNodeRegistryPlugin, telegram::TelegramChannelPlugin,
 };
 
 #[derive(Clone)]
@@ -35,6 +28,7 @@ pub struct Application {
     pub context_engine: Arc<dyn ContextEngine>,
     pub runtime: Arc<ApplicationRuntime>,
     pub workspace_runtime: WorkspaceRuntime,
+    pub plugin_manager: PluginManager,
     pub plugin_registry: PluginRegistry,
     pub resource_registry: ResourceRegistry,
 }
@@ -47,64 +41,40 @@ impl Application {
         let workspace_host =
             WorkspaceRuntimeHost::new(runtime_config.workspace.clone(), workspace_identity.clone());
         let workspace_runtime = workspace_host.workspace_runtime.clone();
+        let plugin_manager = PluginManager::new(runtime_config.plugins.clone());
         let mut plugin_registry = PluginRegistry::default();
         let mut resource_registry = ResourceRegistry::default();
         let event_bus = EventBus::default();
         let hook_bus = HookBus::default();
-        let mut tool_registry = ToolRegistry::default();
+        let tool_registry = ToolRegistry::builtins();
 
         for provider in &runtime_config.agent_runtime.llm.providers {
             match provider {
                 crate::config::LlmProviderConfig::OpenAi(config) => {
                     let plugin = Arc::new(OpenAiProviderPlugin::new(config.clone()));
-                    resource_registry.extend(plugin.provided_resources());
-                    plugin_registry.register(plugin.clone() as PluginRef);
-                    plugin_registry.register_provider(plugin);
+                    plugin_manager.discover(PluginManagerCandidate::provider(
+                        plugin.clone() as PluginRef,
+                        plugin.clone(),
+                        plugin.provided_resources(),
+                        true,
+                    ));
                 }
             }
         }
 
-        register_tool_plugin(
-            &mut plugin_registry,
-            &mut tool_registry,
-            Arc::new(ReadFileToolPlugin),
-        );
-        register_tool_plugin(
-            &mut plugin_registry,
-            &mut tool_registry,
-            Arc::new(ListFilesToolPlugin),
-        );
-        register_tool_plugin(
-            &mut plugin_registry,
-            &mut tool_registry,
-            Arc::new(ShellToolPlugin),
-        );
-
-        let workspace_identity_plugin = Arc::new(WorkspaceIdentityContextPlugin);
-        plugin_registry.register(workspace_identity_plugin.clone() as PluginRef);
-        plugin_registry.register_context(workspace_identity_plugin as Arc<dyn ContextPlugin>);
-
-        let task_state = Arc::new(TaskStateContextPlugin);
-        plugin_registry.register(task_state.clone() as PluginRef);
-        plugin_registry.register_context(task_state as Arc<dyn ContextPlugin>);
-
-        let summary_loader = Arc::new(SummaryLoaderContextPlugin);
-        plugin_registry.register(summary_loader.clone() as PluginRef);
-        plugin_registry.register_context(summary_loader as Arc<dyn ContextPlugin>);
-
-        let context_plugin = Arc::new(RetrievalBridgeContextPlugin::new(
-            &workspace_runtime.workspace.paths,
+        plugin_manager.discover(PluginManagerCandidate::plugin(
+            Arc::new(TelegramChannelPlugin) as PluginRef,
+            false,
         ));
-        plugin_registry.register(context_plugin.clone() as PluginRef);
-        plugin_registry.register_context(context_plugin as Arc<dyn ContextPlugin>);
-
-        let sqlite = SqlitePersistence::open(&runtime_config)?;
-        let session_storage = Arc::new(SqliteSessionStorePlugin::new(sqlite.session_store()));
-        plugin_registry.register(session_storage.clone() as PluginRef);
-        plugin_registry.register_storage(session_storage as Arc<dyn StoragePlugin>);
-        let event_storage = Arc::new(SqliteContextStorePlugin::new(sqlite.event_store()));
-        plugin_registry.register(event_storage.clone() as PluginRef);
-        plugin_registry.register_storage(event_storage as Arc<dyn StoragePlugin>);
+        plugin_manager.discover(PluginManagerCandidate::plugin(
+            Arc::new(LocalSchedulerPlugin) as PluginRef,
+            false,
+        ));
+        plugin_manager.discover(PluginManagerCandidate::plugin(
+            Arc::new(StaticNodeRegistryPlugin) as PluginRef,
+            false,
+        ));
+        plugin_manager.initialize(&mut plugin_registry, &mut resource_registry)?;
 
         let plugin_host = PluginHost::new(
             plugin_registry.clone(),
@@ -135,20 +105,9 @@ impl Application {
             )),
             runtime,
             workspace_runtime,
+            plugin_manager,
             plugin_registry,
             resource_registry,
         })
     }
-}
-
-fn register_tool_plugin<T>(
-    plugin_registry: &mut PluginRegistry,
-    tool_registry: &mut ToolRegistry,
-    plugin: Arc<T>,
-) where
-    T: ToolPlugin + 'static,
-{
-    plugin_registry.register(plugin.clone() as PluginRef);
-    plugin_registry.register_tool(plugin.clone() as Arc<dyn ToolPlugin>);
-    tool_registry.register(plugin);
 }

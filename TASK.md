@@ -247,6 +247,54 @@
 - [x] 为 workspace loader / context assembly / tool loop 增加回归测试
 - [x] 补一版真实的开发与运行说明
 
+## Batch 8: Plugin System Refactor Governance
+这不是“整理一下目录”。
+
+目标：
+- 把当前伪插件目录重构为 `builtin runtime + real plugin system`
+- 把 builtin tools / storage / context internals 从 `src/plugins/*` 迁出
+- 把真正插件重组为“一插件一目录”
+- 引入真实 `PluginManager`，让 plugin enable/disable 和生命周期真正成立
+
+执行前先读：
+- `docs/PLUGIN_REFACTOR_PLAN.md`
+- `docs/PLUGIN_SDK.md`
+- `docs/WORKSPACE_AND_CONFIG_SPEC.md`
+
+- [x] 建立 `src/builtin/**` 目录边界：
+  - `src/builtin/tools/*`
+  - `src/builtin/storage/*`
+  - `src/builtin/context/*`
+- [x] 将当前 builtin file tools 从 `src/plugins/tools/*` 迁到 `src/builtin/tools/*`
+- [x] 将当前 builtin storage 实现从 `src/plugins/storage/*` 迁到 `src/builtin/storage/*`
+- [x] 将当前 builtin context/runtime internals 从 `src/plugins/context/*` 迁到 `src/builtin/context/*`
+- [x] 收缩 `src/plugins/mod.rs` 的职责，使其只承载真正插件而不是内置模块分类目录
+- [x] 将现有真正插件候选改为一插件一目录：
+  - `openai`
+  - `telegram`
+  - `local_scheduler`
+  - `static_nodes`
+- [x] 新增 `PluginManager` 最小版落点：
+  - 读取 `plugins.toml`
+  - 解析 enabled / disabled / config refs
+  - 构建 plugin load plan
+  - 管理 plugin runtime state
+- [x] 将 `Application::new()` 从“硬编码注册所有伪插件”重构为：
+  - builtin runtime boot
+  - plugin manager load enabled plugins
+  - compose runtime host
+- [x] 将 daemon 的 `plugin.*` handler 接到真实 plugin state，而不是 manifest 派生伪状态
+- [x] 为 plugin enable / disable / reload 增加最小回归测试
+- [x] 保持第一阶段范围收敛：
+  - 不做动态库加载
+  - 不做远程 marketplace
+  - 不做沙箱插件执行
+  - 先把 builtin 与 real plugin 的边界纠正
+- [x] 完成后补文档漂移清理：
+  - `docs/PLUGIN_SDK.md`
+  - `docs/ARCHITECTURE_ENTRYPOINT.md`
+  - 相关 API / config 文档
+
 ---
 ## 明确不优先做
 - [ ] Telegram 全链路接入

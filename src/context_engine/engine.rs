@@ -1,3 +1,6 @@
+use crate::builtin::context::retrieval_bridge::{
+    RetrievalBridgeContextPlugin, RetrievalCollectionKind, RetrievedDocument,
+};
 use crate::config::{WorkspaceIdentityPack, WorkspacePaths};
 use crate::context_engine::{
     assembler::{AssembledContext, ContextAssemblyRequest, TokenBreakdown},
@@ -6,9 +9,6 @@ use crate::context_engine::{
 };
 use crate::domain::{
     Confidence, ContextBlock, ContextBlockKind, ContextSource, Freshness, ResumePack, RuntimeEvent,
-};
-use crate::plugins::context::retrieval_bridge::{
-    RetrievalBridgeContextPlugin, RetrievalCollectionKind, RetrievedDocument,
 };
 use anyhow::Result;
 pub trait ContextEngine: Send + Sync {
