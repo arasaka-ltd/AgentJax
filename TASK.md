@@ -13,6 +13,50 @@
 当前目标不是继续脑暴，而是把项目分批次做成一个真正能加载 workspace、能组上下文、能执行工具、能持久化 session 的 agent runtime。
 
 ---
+## 当前实现盘点（对照 `docs/`）
+
+这部分用于防止 `TASK.md` 落后于代码现实。
+如果代码已经先于任务清单推进，这里必须先修正认知，再安排后续批次。
+
+### 已有真实落地
+- [x] workspace/config/runtime 最小加载链路
+- [x] context assembly + XML prompt 注入
+- [x] session / event 持久化
+- [x] TUI + streaming reply 最小闭环
+- [x] task runtime 最小闭环
+- [x] `src/builtin/**` 与 `src/plugins/<plugin_id>/**` 的第一轮结构纠偏
+- [x] `PluginManager` 最小版落点已存在，并接入 `Application::new()` 与 daemon plugin 描述输出
+
+### 已有骨架，但远未达到 `docs/` 定义深度
+- [ ] file tools 新协议：
+  - 当前仍主要是 `read_file` / `list_files` / `shell`
+  - `read` / `edit` / `write` 尚未按 `docs/FILE_TOOLS_SPEC.md` 落地
+- [ ] retrieval tools 新协议：
+  - 当前仍是 context assembly 自动检索
+  - `memory.search/get` / `knowledge.search/get` 尚未按 `docs/RETRIEVAL_TOOL_SPEC.md` 落地
+- [ ] plugin manager 深化：
+  - 已有 discovery / enabled / disabled / basic reload
+  - 但 `config refs` / health / drain / swap / lifecycle 深度治理不足
+- [ ] config manager 深化：
+  - 已有 loader / initializer / plugins.toml 最小消费
+  - 但 validator / migrator / diff / reload plan 仍明显不足
+- [ ] usage / billing / scheduler / node：
+  - 结构和 manifest 已有
+  - 但真实执行、计费、节点治理大多还是骨架
+- [ ] LCM / context engine：
+  - 基础 assembly 已有
+  - 但 summary DAG / compaction / recompute / resume-first 远未完成
+
+### 文档已定义、代码尚未真正开始的重点
+- [ ] 文本+图片统一 `read`
+- [ ] 精确行列 `edit`
+- [ ] 支持 `mkdir -p` 语义的 `write`
+- [ ] 面向 Agent 的 retrieval tool surface
+- [ ] 真正可操作的 plugin enable / disable / reload 治理链
+- [ ] 配置热重载的真实执行计划
+- [ ] 按 spec 深化的 scheduler / node / billing 子系统
+
+---
 ## Blocking Track A: Config Bootstrap + OpenAI Provider Testability
 
 这是一条测试解锁支线。
@@ -294,6 +338,168 @@
   - `docs/PLUGIN_SDK.md`
   - `docs/ARCHITECTURE_ENTRYPOINT.md`
   - 相关 API / config 文档
+
+## Batch 9: File Tools Deep Implementation
+执行前先读：
+- `docs/FILE_TOOLS_SPEC.md`
+- `docs/PROMPT_ASSEMBLY_SPEC.md`
+- `/Users/jaxlocke/rig-docs/pages/docs/quickstart/tools.mdx`
+
+- [ ] 将当前 builtin tools 从 `read_file` / `list_files` / `shell` 过渡到正式 file tool surface：
+  - `read`
+  - `edit`
+  - `write`
+- [ ] `read` 支持文本文件读取
+- [ ] `read` 支持图片文件读取
+- [ ] `read` 支持按 `start_line` / `end_line` 精确读取
+- [ ] `read` 输出显式包含 newline 风格：
+  - `lf`
+  - `crlf`
+  - `mixed`
+- [ ] `edit` 支持文本文件区间编辑：
+  - `start_line`
+  - `start_column`
+  - `end_line`
+  - `end_column`
+  - `new_text`
+- [ ] 明确并落地 `edit` 的区间语义：
+  - start inclusive
+  - end exclusive
+- [ ] `write` 支持创建文本文件并写入内容
+- [ ] `write` 支持 `create_dirs=true` 的 `mkdir -p` 语义
+- [ ] `write` / `edit` 对 `\n`、LF、CRLF 做统一 runtime 处理
+- [ ] 将新 file tools 接入 tool registry、prompt XML、tool calling loop
+- [ ] 为核心文件、memory、knowledge 编辑补最小 policy / regression 测试
+
+## Batch 10: Retrieval Tools Deep Implementation
+执行前先读：
+- `docs/RETRIEVAL_TOOL_SPEC.md`
+- `docs/RAG_KNOWLEDGE_MEMORY_SPEC.md`
+- `docs/WORKSPACE_AND_CONFIG_SPEC.md`
+- `/Users/jaxlocke/rig-docs/pages/docs/architecture.mdx`
+- `/Users/jaxlocke/rig-docs/pages/docs/quickstart/embeddings.mdx`
+- `/Users/jaxlocke/rig-docs/pages/docs/integrations.mdx`
+
+- [ ] 先对齐 Rig 已有抽象边界，避免重复造轮子：
+  - provider client / completion model 继续复用 Rig 风格抽象
+  - embedding model 抽象尽量对齐 Rig
+  - vector store / index 能力优先参考 Rig 的 `VectorStore` / `VectorStoreIndex` 心智模型
+  - 不在 AgentJax 内部重复发明一套与 Rig 平行的 provider / embedding / vector index 基础接口
+
+- [ ] 定义并落地正式 retrieval tool surface：
+  - `memory.search`
+  - `memory.get`
+  - `knowledge.search`
+  - `knowledge.get`
+- [ ] `memory.search` 支持：
+  - query
+  - top_k
+  - scope
+  - mode
+- [ ] `memory.get` 支持：
+  - `memory_ref`
+  - path fallback
+  - line-range 读取
+- [ ] `knowledge.search` 支持：
+  - query
+  - `library` / `libraries`
+  - path prefix
+  - mode
+  - metadata filters
+- [ ] `knowledge.get` 支持：
+  - `doc_ref`
+  - path fallback
+  - `library`
+  - line-range / chunk inspect
+- [ ] 建立稳定引用层：
+  - `memory_ref`
+  - `doc_ref`
+  - `chunk_ref`
+- [ ] 将当前 context assembly 自动检索逐步改成：
+  - 可策略控制
+  - 可由 Agent 显式调用
+  - 不再把 retrieval 只做成隐式注入
+- [ ] 为 retrieval tools 补最小回归测试与 prompt 行为验证
+
+## Batch 11: Plugin Manager Deepening
+执行前先读：
+- `docs/PLUGIN_REFACTOR_PLAN.md`
+- `docs/PLUGIN_SDK.md`
+- `docs/CONFIG_MANAGER_SPEC.md`
+- `/Users/jaxlocke/rig-docs/pages/docs/integrations.mdx`
+
+- [ ] 明确 AgentJax 与 Rig 的职责分层，避免重复实现 Rig 已覆盖的层：
+  - Rig 负责 provider / completion / embedding / vector store 抽象
+  - AgentJax 负责 workspace / daemon / plugin runtime / task runtime / context engine / policy
+  - 不把 AgentJax 的 plugin manager 退化成 Rig provider 封装的重复壳
+
+- [ ] 让 `PluginManager` 真正消费 `plugins.toml` 的完整语义：
+  - enabled
+  - disabled
+  - config refs
+  - policy flags
+  - reload hints
+- [ ] 为 plugin runtime state 建立更真实的状态机与错误传播
+- [ ] 让 plugin lifecycle 真正接线：
+  - `on_load`
+  - `on_startup`
+  - `on_shutdown`
+- [ ] 增加 plugin health / failure / dependency diagnostics
+- [ ] 为 daemon `plugin.inspect` 补真实内容：
+  - status
+  - dependencies
+  - config ref
+  - health
+- [ ] 为 `plugin.reload` 接入真实 reload / drain plan，而不是仅做状态翻转
+- [ ] 清理 Plugin SDK 文档与代码漂移
+
+## Batch 12: Config Manager + Reload Deepening
+执行前先读：
+- `docs/CONFIG_MANAGER_SPEC.md`
+- `docs/WORKSPACE_AND_CONFIG_SPEC.md`
+
+- [ ] 为 config loader 增加 validator / normalizer 层
+- [ ] 增加 config snapshot 概念与模块子快照
+- [ ] 增加 config diff / reload plan 生成
+- [ ] 将当前 `src/core/reload.rs` 从壳扩成真实 reload plan 模型
+- [ ] 让 `config.reload` 返回真实 affected modules / drain plan
+- [ ] 为 plugin enable/disable 变更接入 `DrainAndSwap` 语义
+- [ ] 为配置迁移、schema 校验、fragment 引用补回归测试
+
+## Batch 13: LCM / Context Engine Deepening
+执行前先读：
+- `docs/LCM_CONTEXT_ENGINE.md`
+- `docs/EVENT_TASK_LCM_RUNTIME.md`
+
+- [ ] 将当前 context engine 从最小 assembly 扩展到更接近 spec：
+  - active context projection
+  - summary nodes
+  - checkpoint / resume pack 深化
+- [ ] 为 event-stream-first 上下文恢复建立更正式的数据边界
+- [ ] 引入最小 compaction / invalidation / recompute 流程
+- [ ] 为 resume-first 设计补最小可验证闭环
+- [ ] 清理 context / LCM 文档与代码漂移
+
+## Batch 14: Usage / Billing / Scheduler / Node Deepening
+执行前先读：
+- `docs/USAGE_BILLING_SCHEDULER_NODE_SPEC.md`
+
+- [ ] 让 usage ledger 不再只是事件附属信息，而形成明确统计面
+- [ ] 将 OpenAI billing 从 placeholder local estimate 提升为正式最小实现
+- [ ] 让 scheduler plugin 不再只有 manifest，而具备最小执行闭环
+- [ ] 让 node registry/plugin 不再只有静态声明，而具备最小 inspect / selector 落点
+- [ ] 为 usage / billing / scheduler / node 补最小回归测试
+
+## Batch 15: Surface / Transport Completion
+执行前先读：
+- `docs/CHANNELS_DAEMON_CLIENT_SPEC.md`
+- `docs/DAEMON_API_IPC_SCHEMA.md`
+
+- [ ] 补齐 WebSocket transport 的真实可用性验证，而不只保留最小 server
+- [ ] 校对 daemon API 实现与 schema 文档漂移
+- [ ] 为 subscription / stream / cancellation / followup events 增加更强回归测试
+- [ ] 明确 core surfaces 与 plugin channels 的代码边界
+- [ ] 保持 Telegram 等外部 channel 仍是插件，而不是回流进 core surface
 
 ---
 ## 明确不优先做

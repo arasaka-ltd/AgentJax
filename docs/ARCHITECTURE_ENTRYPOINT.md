@@ -112,6 +112,14 @@ AgentJax 当前的正式架构规范由以下文档组成。
   - `\n` 与 LF/CRLF 处理
   - `mkdir -p` 风格写入
   - 核心文件、memory、knowledge 的编辑边界
+### Spec 6.3：Rig Alignment
+- `docs/RIG_ALIGNMENT.md`
+- 作用：明确 AgentJax 与 Rig 的职责分层，避免重复造轮子
+- 包括：
+  - Rig 已覆盖的 provider / tool / embedding / vector store 抽象
+  - AgentJax 应负责的 daemon / workspace / plugin runtime / task runtime / context engine / policy 层
+  - 禁止重复实现的基础层
+  - retrieval / file tools / plugin manager 对 Rig 的对齐原则
 ### Plan A：`src/plugins` Refactor
 - `docs/PLUGIN_REFACTOR_PLAN.md`
 - 作用：治理 builtin runtime 与真实插件系统的边界
