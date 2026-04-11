@@ -302,8 +302,10 @@ src/
 当前 `plugin.list` / `plugin.inspect` / `plugin.reload` 只有壳。
 重构后应接到 `PluginManager`：
 - `plugin.list` 返回真实状态
-- `plugin.inspect` 返回 config / dependencies / health / lifecycle state
+- `plugin.inspect` 返回 config / dependencies / health / lifecycle state / provided resources / last error
 - `plugin.reload` 真正触发 drain / reload / restart plan
+- `plugin.test` 返回 manager 视角的 readiness checks，而不是只验证 manifest 是否存在
+- `smoke.run` 至少应能对 plugin manager 做端到端冒烟校验，避免“接口可达但插件控制面不可用”的假阳性
 
 ---
 ## 9. 对 `Application::new()` 的影响

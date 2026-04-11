@@ -18,7 +18,9 @@ pub use plugin::{
     BackendPlugin, BillingPlugin, ContextPlugin, Plugin, PluginContext, PluginHost, PluginRef,
     ProviderPlugin, ProviderPluginRef, ResourceProviderPlugin, StoragePlugin,
 };
-pub use plugin_manager::{PluginManager, PluginManagerCandidate};
+pub use plugin_manager::{
+    PluginActionReport, PluginManager, PluginManagerCandidate, PluginRuntimeSnapshot,
+};
 pub use registry::PluginRegistry;
 pub use reload::{ReloadInstruction, ReloadPlan};
 pub use resource_registry::ResourceRegistry;

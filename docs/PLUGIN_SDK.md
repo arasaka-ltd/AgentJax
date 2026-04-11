@@ -274,6 +274,7 @@ pub enum WorkflowCapability {
 - `PluginRuntime`
 - `PluginContext`
 - `PluginRegistry`
+- `PluginManager`
 ### 5.1 Plugin
 ```rust
 #[async_trait::async_trait]
@@ -325,7 +326,9 @@ pub struct PluginManifest {
 - 按 capability 查询插件
 - 校验依赖
 - 构建 workspace 可用插件集
-- 分发生命周期与 hook
+
+`PluginRegistry` 负责索引与查询，不再作为生命周期执行者；`on_load` / `on_startup` / `on_shutdown`、enable/disable 判定、reload 行为与运行态诊断由 `PluginManager` 统一驱动。
+
 ```rust
 pub struct PluginRegistry {
     plugins: Vec<std::sync::Arc<dyn Plugin>>,
@@ -340,6 +343,15 @@ pub struct PluginRegistry {
 - 远程插件
 - 隔离执行
 - 版本解析与兼容策略
+### 5.4 PluginManager
+当前实现中，`PluginManager` 是插件运行时控制面：
+- 读取并解释 `plugins.toml` 的 enabled / disabled / config refs / policy flags / reload hints
+- 基于依赖关系决定启动顺序
+- 驱动 `on_load` / `on_startup` / `on_shutdown`
+- 维护 `Discovered` / `Disabled` / `Loading` / `Loaded` / `Starting` / `Running` / `Stopping` / `Stopped` / `Failed` 状态
+- 暴露 daemon 控制面所需的 inspect / reload / test 快照与诊断
+
+这意味着插件作者只需要实现 manifest 与生命周期；是否启用、何时重载、失败如何向外暴露，统一由 runtime 侧治理。
 ---
 ## 6. PluginContext：插件作者真正拿到的能力
 这是 SDK 最关键的对象。

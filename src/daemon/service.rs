@@ -508,13 +508,30 @@ impl Daemon {
         &self,
         params: PluginInspectRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        let plugin = self
-            .plugin_descriptors()
-            .into_iter()
-            .find(|plugin| plugin.plugin_id == params.plugin_id)
+        let snapshot = self
+            .app
+            .plugin_manager
+            .snapshot(
+                &params.plugin_id,
+                &self.app.runtime_config.plugin_api_version,
+            )
             .ok_or_else(plugin_not_found)?;
         Ok((
-            self.serialize(PluginInspectResponse { plugin })?,
+            self.serialize(PluginInspectResponse {
+                plugin: snapshot.plugin,
+                enabled: snapshot.enabled,
+                default_enabled: snapshot.default_enabled,
+                healthy: snapshot.healthy,
+                dependencies: snapshot.dependencies,
+                optional_dependencies: snapshot.optional_dependencies,
+                required_permissions: snapshot.required_permissions,
+                provided_resources: snapshot.provided_resources,
+                config_ref: snapshot.config_ref,
+                policy_flags: snapshot.policy_flags,
+                reload_hint: snapshot.reload_hint,
+                last_lifecycle_stage: snapshot.last_lifecycle_stage,
+                last_error: snapshot.last_error,
+            })?,
             Vec::new(),
         ))
     }
@@ -523,9 +540,19 @@ impl Daemon {
         &self,
         params: PluginReloadRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        self.app
+        let report = self
+            .app
             .plugin_manager
-            .reload(&params.plugin_id)
+            .reload(
+                &params.plugin_id,
+                &self.app.plugin_registry,
+                &self.app.resource_registry,
+                &self.app.tool_registry,
+                &self.app.event_bus,
+                self.app.plugin_host.hooks(),
+                &self.app.runtime_config,
+                &self.app.workspace_host,
+            )
             .map_err(|error| {
                 ApiError::new(
                     ApiErrorCode::NotFound,
@@ -536,8 +563,12 @@ impl Daemon {
         self.push_log(format!("plugin reload requested: {}", params.plugin_id));
         Ok((
             self.serialize(PluginReloadResponse {
-                ok: true,
-                plugin_id: params.plugin_id,
+                ok: report.ok,
+                plugin_id: report.plugin_id,
+                status: format!("{:?}", report.status),
+                lifecycle_stage: report.lifecycle_stage,
+                summary: report.summary,
+                checks: report.checks,
             })?,
             Vec::new(),
         ))
@@ -547,18 +578,28 @@ impl Daemon {
         &self,
         params: PluginTestRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        if !self
-            .plugin_descriptors()
-            .iter()
-            .any(|plugin| plugin.plugin_id == params.plugin_id)
-        {
-            return Err(plugin_not_found());
-        }
+        let report = self
+            .app
+            .plugin_manager
+            .test_plugin(
+                &params.plugin_id,
+                &self.app.runtime_config.plugin_api_version,
+            )
+            .map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::NotFound,
+                    format!("plugin test failed: {error}"),
+                    false,
+                )
+            })?;
         Ok((
             self.serialize(PluginTestResponse {
-                ok: true,
-                plugin_id: params.plugin_id,
-                summary: "plugin manifest is registered and loadable".into(),
+                ok: report.ok,
+                plugin_id: report.plugin_id,
+                status: format!("{:?}", report.status),
+                lifecycle_stage: report.lifecycle_stage,
+                summary: report.summary,
+                checks: report.checks,
             })?,
             Vec::new(),
         ))
@@ -887,17 +928,99 @@ impl Daemon {
         &self,
         params: SmokeRunRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        Ok((
-            self.serialize(SmokeRunResponse {
-                ok: true,
-                target: params.target.clone(),
-                summary: format!(
-                    "smoke target {} is reachable in daemon control plane",
-                    params.target
-                ),
-            })?,
-            Vec::new(),
-        ))
+        match params.target.as_str() {
+            "daemon" | "plugins" | "plugin-manager" => {
+                let snapshots = self
+                    .app
+                    .plugin_manager
+                    .snapshots(&self.app.runtime_config.plugin_api_version);
+                let plugin_count = snapshots.len();
+                let enabled_count = snapshots.iter().filter(|plugin| plugin.enabled).count();
+                let healthy_count = snapshots.iter().filter(|plugin| plugin.healthy).count();
+                let mut checks = vec![
+                    format!("plugins_discovered={plugin_count}"),
+                    format!("plugins_enabled={enabled_count}"),
+                    format!("plugins_healthy={healthy_count}"),
+                ];
+
+                if plugin_count == 0 {
+                    checks.push("plugin_manager=empty".into());
+                    return Ok((
+                        self.serialize(SmokeRunResponse {
+                            ok: false,
+                            target: params.target,
+                            summary: "plugin manager smoke failed: no plugins discovered".into(),
+                            checks,
+                        })?,
+                        Vec::new(),
+                    ));
+                }
+
+                for snapshot in &snapshots {
+                    let report = self
+                        .app
+                        .plugin_manager
+                        .test_plugin(
+                            &snapshot.plugin.plugin_id,
+                            &self.app.runtime_config.plugin_api_version,
+                        )
+                        .map_err(|error| {
+                            ApiError::new(
+                                ApiErrorCode::InternalError,
+                                format!(
+                                    "smoke run failed while validating plugin {}: {error}",
+                                    snapshot.plugin.plugin_id
+                                ),
+                                false,
+                            )
+                        })?;
+                    checks.push(format!(
+                        "plugin={} status={:?} ok={}",
+                        report.plugin_id, report.status, report.ok
+                    ));
+                }
+
+                let failed_plugins: Vec<&str> = snapshots
+                    .iter()
+                    .filter(|snapshot| snapshot.enabled && !snapshot.healthy)
+                    .map(|snapshot| snapshot.plugin.plugin_id.as_str())
+                    .collect();
+                if !failed_plugins.is_empty() {
+                    checks.push(format!("failed_plugins={}", failed_plugins.join(",")));
+                }
+
+                let ok = !snapshots.is_empty() && failed_plugins.is_empty();
+                let summary = if ok {
+                    format!(
+                        "plugin manager smoke passed: {healthy_count}/{plugin_count} plugins healthy"
+                    )
+                } else {
+                    format!(
+                        "plugin manager smoke failed: unhealthy plugins [{}]",
+                        failed_plugins.join(", ")
+                    )
+                };
+
+                Ok((
+                    self.serialize(SmokeRunResponse {
+                        ok,
+                        target: params.target,
+                        summary,
+                        checks,
+                    })?,
+                    Vec::new(),
+                ))
+            }
+            _ => Ok((
+                self.serialize(SmokeRunResponse {
+                    ok: false,
+                    target: params.target.clone(),
+                    summary: format!("unknown smoke target {}", params.target),
+                    checks: vec!["supported_targets=daemon,plugins,plugin-manager".into()],
+                })?,
+                Vec::new(),
+            )),
+        }
     }
 
     fn handle_logs_tail(
@@ -1922,9 +2045,10 @@ mod tests {
 
     use crate::{
         api::{
-            ApiMethod, RequestEnvelope, RequestId, ScheduleCreateRequest, ScheduleUpdateRequest,
+            ApiMethod, PluginInspectResponse, PluginReloadResponse, PluginTestResponse,
+            RequestEnvelope, RequestId, ScheduleCreateRequest, ScheduleUpdateRequest,
             SessionModelInspectResponse, SessionModelSwitchResponse, SessionModelSwitchResult,
-            SessionSendResponse, TaskGetResponse,
+            SessionSendResponse, SmokeRunResponse, TaskGetResponse,
         },
         app::Application,
         config::{
@@ -2616,7 +2740,136 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plugin_control_plane_handlers_return_runtime_details() {
+        let root = temp_path("daemon-plugin-control");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&workspace_root).unwrap();
+
+        let daemon = Daemon::new(
+            Application::new(
+                ConfigRoot::new(root.join("config")),
+                test_runtime_config(&root, &workspace_root, Some("http://127.0.0.1:1".into())),
+                test_identity(&workspace_root),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let inspect = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_plugin_inspect".into()),
+                method: ApiMethod::PluginInspect,
+                params: serde_json::json!({ "plugin_id": "provider.openai.openai-default" }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(inspect_response) = inspect.response else {
+            panic!("expected response envelope");
+        };
+        let inspect_result: PluginInspectResponse =
+            serde_json::from_value(inspect_response.result.unwrap()).unwrap();
+        assert_eq!(
+            inspect_result.plugin.plugin_id,
+            "provider.openai.openai-default"
+        );
+        assert!(inspect_result.enabled);
+        assert!(inspect_result.healthy);
+        assert!(inspect_result
+            .provided_resources
+            .iter()
+            .any(|resource| resource.starts_with("provider:openai-default:")));
+
+        let reload = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_plugin_reload".into()),
+                method: ApiMethod::PluginReload,
+                params: serde_json::json!({ "plugin_id": "provider.openai.openai-default" }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(reload_response) = reload.response else {
+            panic!("expected response envelope");
+        };
+        let reload_result: PluginReloadResponse =
+            serde_json::from_value(reload_response.result.unwrap()).unwrap();
+        assert!(reload_result.ok);
+        assert_eq!(reload_result.plugin_id, "provider.openai.openai-default");
+        assert_eq!(reload_result.status, "Running");
+        assert!(reload_result
+            .checks
+            .iter()
+            .any(|check| check == "shutdown completed"));
+
+        let test = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_plugin_test".into()),
+                method: ApiMethod::PluginTest,
+                params: serde_json::json!({ "plugin_id": "provider.openai.openai-default" }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(test_response) = test.response else {
+            panic!("expected response envelope");
+        };
+        let test_result: PluginTestResponse =
+            serde_json::from_value(test_response.result.unwrap()).unwrap();
+        assert!(test_result.ok);
+        assert_eq!(test_result.plugin_id, "provider.openai.openai-default");
+        assert_eq!(test_result.status, "Running");
+        assert!(test_result
+            .checks
+            .iter()
+            .any(|check| check == "enabled=true"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn smoke_run_validates_plugin_manager_runtime() {
+        let root = temp_path("daemon-smoke-plugin-manager");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&workspace_root).unwrap();
+
+        let daemon = Daemon::new(
+            Application::new(
+                ConfigRoot::new(root.join("config")),
+                test_runtime_config(&root, &workspace_root, Some("http://127.0.0.1:1".into())),
+                test_identity(&workspace_root),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let smoke = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_smoke_plugins".into()),
+                method: ApiMethod::SmokeRun,
+                params: serde_json::json!({ "target": "plugin-manager" }),
+                meta: None,
+            })
+            .await;
+        let crate::api::ServerEnvelope::Response(smoke_response) = smoke.response else {
+            panic!("expected response envelope");
+        };
+        let smoke_result: SmokeRunResponse =
+            serde_json::from_value(smoke_response.result.unwrap()).unwrap();
+        assert!(smoke_result.ok);
+        assert_eq!(smoke_result.target, "plugin-manager");
+        assert!(smoke_result.summary.contains("plugin manager smoke passed"));
+        assert!(smoke_result
+            .checks
+            .iter()
+            .any(|check| check.starts_with("plugins_discovered=")));
+        assert!(smoke_result
+            .checks
+            .iter()
+            .any(|check| check.contains("provider.openai.openai-default")));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn control_plane_handlers_return_structured_responses() {
         let root = temp_path("daemon-api-control");
         let workspace_root = root.join("workspace");

@@ -48,33 +48,18 @@ impl Application {
         let hook_bus = HookBus::default();
         let tool_registry = ToolRegistry::builtins();
 
-        for provider in &runtime_config.agent_runtime.llm.providers {
-            match provider {
-                crate::config::LlmProviderConfig::OpenAi(config) => {
-                    let plugin = Arc::new(OpenAiProviderPlugin::new(config.clone()));
-                    plugin_manager.discover(PluginManagerCandidate::provider(
-                        plugin.clone() as PluginRef,
-                        plugin.clone(),
-                        plugin.provided_resources(),
-                        true,
-                    ));
-                }
-            }
+        for candidate in plugin_candidates(&runtime_config) {
+            plugin_manager.discover(candidate);
         }
-
-        plugin_manager.discover(PluginManagerCandidate::plugin(
-            Arc::new(TelegramChannelPlugin) as PluginRef,
-            false,
-        ));
-        plugin_manager.discover(PluginManagerCandidate::plugin(
-            Arc::new(LocalSchedulerPlugin) as PluginRef,
-            false,
-        ));
-        plugin_manager.discover(PluginManagerCandidate::plugin(
-            Arc::new(StaticNodeRegistryPlugin) as PluginRef,
-            false,
-        ));
-        plugin_manager.initialize(&mut plugin_registry, &mut resource_registry)?;
+        plugin_manager.initialize(
+            &mut plugin_registry,
+            &mut resource_registry,
+            &tool_registry,
+            &event_bus,
+            &hook_bus,
+            &runtime_config,
+            &workspace_host,
+        )?;
 
         let plugin_host = PluginHost::new(
             plugin_registry.clone(),
@@ -110,4 +95,36 @@ impl Application {
             resource_registry,
         })
     }
+}
+
+fn plugin_candidates(runtime_config: &RuntimeConfig) -> Vec<PluginManagerCandidate> {
+    let mut candidates = Vec::new();
+
+    for provider in &runtime_config.agent_runtime.llm.providers {
+        match provider {
+            crate::config::LlmProviderConfig::OpenAi(config) => {
+                let plugin = Arc::new(OpenAiProviderPlugin::new(config.clone()));
+                candidates.push(PluginManagerCandidate::provider(
+                    plugin.clone() as PluginRef,
+                    plugin.clone(),
+                    plugin.provided_resources(),
+                    true,
+                ));
+            }
+        }
+    }
+
+    candidates.push(PluginManagerCandidate::plugin(
+        Arc::new(TelegramChannelPlugin) as PluginRef,
+        false,
+    ));
+    candidates.push(PluginManagerCandidate::plugin(
+        Arc::new(LocalSchedulerPlugin) as PluginRef,
+        false,
+    ));
+    candidates.push(PluginManagerCandidate::plugin(
+        Arc::new(StaticNodeRegistryPlugin) as PluginRef,
+        false,
+    ));
+    candidates
 }

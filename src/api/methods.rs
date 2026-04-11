@@ -201,6 +201,18 @@ pub struct PluginInspectRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PluginInspectResponse {
     pub plugin: PluginDescriptor,
+    pub enabled: bool,
+    pub default_enabled: bool,
+    pub healthy: bool,
+    pub dependencies: Vec<String>,
+    pub optional_dependencies: Vec<String>,
+    pub required_permissions: Vec<String>,
+    pub provided_resources: Vec<String>,
+    pub config_ref: Option<String>,
+    pub policy_flags: BTreeMap<String, bool>,
+    pub reload_hint: Option<String>,
+    pub last_lifecycle_stage: Option<String>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -212,6 +224,10 @@ pub struct PluginReloadRequest {
 pub struct PluginReloadResponse {
     pub ok: bool,
     pub plugin_id: String,
+    pub status: String,
+    pub lifecycle_stage: Option<String>,
+    pub summary: String,
+    pub checks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -223,7 +239,10 @@ pub struct PluginTestRequest {
 pub struct PluginTestResponse {
     pub ok: bool,
     pub plugin_id: String,
+    pub status: String,
+    pub lifecycle_stage: Option<String>,
     pub summary: String,
+    pub checks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -588,6 +607,7 @@ pub struct SmokeRunResponse {
     pub ok: bool,
     pub target: String,
     pub summary: String,
+    pub checks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

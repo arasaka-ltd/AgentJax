@@ -473,6 +473,9 @@ secret ref 不存在时：
 5. 生成 reload plan
 6. 调用 supervisor 执行 prepare / health check / swap / drain
 
+对于 plugin runtime，`plugins.toml` 的 enable/disable、config ref、policy flag、reload hint 变化都应被解释成明确的 manager 行为，而不是停留在静态配置字段上。
+`plugin.inspect` / `plugin.reload` / `plugin.test` / `smoke.run(target=plugin-manager)` 应能反映这类配置变化是否已经真正进入运行态。
+
 ### 13.4 一致性要求
 
 同一轮 reload 中，所有模块必须看到同一个 config snapshot version，不允许部分模块消费旧快照、部分模块消费新快照而没有版本边界。
