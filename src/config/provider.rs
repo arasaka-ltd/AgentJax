@@ -5,12 +5,27 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LlmProviderConfig {
     OpenAi(OpenAiProviderConfig),
+    Mock(MockProviderConfig),
 }
 
 impl LlmProviderConfig {
     pub fn provider_id(&self) -> &str {
         match self {
             Self::OpenAi(config) => &config.provider_id,
+            Self::Mock(config) => &config.provider_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MockProviderConfig {
+    pub provider_id: String,
+}
+
+impl Default for MockProviderConfig {
+    fn default() -> Self {
+        Self {
+            provider_id: "mock-default".into(),
         }
     }
 }

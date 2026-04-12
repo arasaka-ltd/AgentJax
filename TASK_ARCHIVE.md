@@ -1,0 +1,147 @@
+- [x] workspace/config/runtime 最小加载链路
+- [x] context assembly + XML prompt 注入
+- [x] session / event 持久化
+- [x] TUI + streaming reply 最小闭环
+- [x] task runtime 最小闭环
+- [x] `src/builtin/**` 与 `src/plugins/<plugin_id>/**` 的第一轮结构纠偏
+- [x] `PluginManager` 最小版落点已存在，并接入 `Application::new()` 与 daemon plugin 描述输出
+- [x] 实现 config root 自动初始化：
+- [x] 初始化逻辑支持“缺失则生成、已存在不覆盖”的幂等行为
+- [x] 提供本地开发初始化入口：
+- [x] 完善 OpenAI provider 配置模型：
+- [x] 实现 OpenAI provider 模型列表拉取
+- [x] 对模型列表做筛选，得到语言模型集合
+- [x] 获取并归一化模型信息：
+- [x] 让 `models.toml` 或等价配置快照能消费上述模型信息
+- [x] 增加最小诊断/测试能力：
+- [x] 保证完成后，能通过真实配置发起一次 LLM 测试请求
+- [x] 实现 workspace 文件真实加载：
+- [x] 定义 `WorkspaceIdentityPack` 或等价结构，承载上述文件内容与来源路径
+- [x] 让 `ConfigLoader` / `bootstrap` 不再只返回硬编码默认值，而是能从本地 `config/` 与 `workspace/` 真读取
+- [x] 实现 `ContextEngine v0`：
+- [x] 让 `session.send` 改为走 `assemble_context()`，而不是直接拼 transcript
+- [x] 为 workspace 加载和 context assembly 补最小测试或可验证样例
+- [x] 实现 `ToolRegistry`
+- [x] 定义 tool plugin 的最小调用接口
+- [x] 实现 `read_file`
+- [x] 实现 `list_files`
+- [x] 实现 `shell`
+- [x] 实现最小 tool calling loop：
+- [x] 将 tool 调用过程写入 `RuntimeEvent`
+- [x] 为 tool timeout / basic error / idempotency 留出最小边界
+- [x] 撰写 `docs/PROMPT_ASSEMBLY_SPEC.md`
+- [x] 定义 `PromptDocument` / `PromptSection` / `PromptFragment` 或等价中间模型
+- [x] 定义 workspace 核心文件的受约束 Markdown 结构解析规则
+- [x] 定义工具注入的 XML 结构
+- [x] 定义 memory / knowledge / task / latest_user_message 的 XML 结构
+- [x] 让 `assemble_context()` 与 `render_prompt_xml()` 显式分层
+- [x] 将当前字符串拼接 prompt 替换为 XML 渲染
+- [x] 保证 Agent 能在 prompt 中明确感知工具可用性
+- [x] 子改进：定义统一的结构化消息注入 schema：
+- [x] 子改进：为每条消息定义 `meta + content` 结构：
+- [x] 子改进：将 `latest_user_message` 扩展为统一 message XML 节点
+- [x] 子改进：保证用户原文内容与程序推断字段分离，避免模型把推断当事实
+- [x] 撰写 `docs/SESSION_EVENT_PERSISTENCE_SPEC.md`
+- [x] 落地 `sqlite_sessions` 最小实现
+- [x] 落地 `sqlite_context` 最小实现
+- [x] 将当前内存 `DaemonStore` 迁到可持久化后端或其抽象层之上
+- [x] 重启 daemon 后仍可恢复 session/messages/events
+- [x] 将 `session.list` / `session.get` / `session.send` 统一走存储抽象
+- [x] 完善 TUI 基础交互：
+- [x] 将 daemon `stream` 输出真实接入 TUI
+- [x] 实现 assistant 流式回复渲染
+- [x] 区分进行中消息与已完成消息
+- [x] 为 tool calling / error / stream end 提供最小可视反馈
+- [x] 保持 TUI 仍然是 out-of-process core surface，而不是 plugin channel
+- [x] 修正模型目录刷新逻辑，避免 `models list --refresh` 覆盖用户显式设置的默认模型
+- [x] 定义 session 级模型绑定基础字段：
+- [x] 将 session 模型绑定纳入持久化层：
+- [x] 让 runtime 在 `session.send` 时按 session 当前模型解析 provider/model，而不是只读全局 default agent
+- [x] 为模型切换预留最小状态机：
+- [x] 为后续 slash 指令预留 daemon API / application service 落点：
+- [x] 为模型切换记录最小事件：
+- [x] 保持这条能力是“模型热切换底层基础”，不在本批直接实现 slash 命令解析
+- [x] 为默认模型、session override、重启恢复补最小回归测试
+- [x] 补齐 `PluginContext` 最小版，使其不只是 config/resource 壳，而具备统一 runtime handles 落点：
+- [x] 将当前 provider / tool / storage 接口对齐到统一 plugin trait 体系：
+- [x] 强化 `PluginRegistry`：
+- [x] 强化 `PluginHost` 生命周期接线：
+- [x] 将 `SqliteSessionStore` 明确提升为 storage plugin 落点，而不只是裸 store 实现
+- [x] 将当前 retrieval/context 相关实现整理为 context plugin 落点，而不是只做内部模块
+- [x] 为 `ResourceRegistry` 预留资源客户端抽象方向：
+- [x] 为 Hook 系统补结构化输入对象基础，而不是只存 `HookPoint`
+- [x] 保持范围收敛在静态注册 + 单 workspace + 单 provider，不进入动态插件加载
+- [x] 为 plugin registry / plugin host / storage plugin / context plugin 补最小回归测试
+- [x] 实现 `MEMORY.md` + `memory/topics/` 的最小读取召回
+- [x] 实现 `knowledge/` 的最小 keyword/full-text 检索
+- [x] 定义最小 collection abstraction
+- [x] 实现 `retrieval_bridge` 最小闭环
+- [x] 将 memory / knowledge 检索结果接入 context assembly
+- [x] 明确区分 memory recall 和 knowledge retrieval
+- [x] 补齐 `runtime.*` 其余 handler
+- [x] 补齐 `config.*` handler
+- [x] 补齐 `plugin.*` handler
+- [x] 补齐 `task.*` handler
+- [x] 补齐 `node.*` handler
+- [x] 补齐 `schedule.*` handler
+- [x] 补齐 `doctor.*` / `smoke.*` / `logs.*` / `metrics.*`
+- [x] 实现 `subscription.cancel`
+- [x] 实现 `stream.cancel`
+- [x] 实现最小 task store
+- [x] 让 `session.send` 可生成 task 或 turn timeline
+- [x] 实现最小 task status transition
+- [x] 实现 task inspect / cancel / retry 的最小闭环
+- [x] 为 checkpoint / resume 留出最小数据模型落点
+- [x] 清理 docs 与代码的漂移项
+- [x] 清理空壳插件与未接线 trait
+- [x] 为 daemon / cli / transport 增加最小集成测试
+- [x] 为 workspace loader / context assembly / tool loop 增加回归测试
+- [x] 补一版真实的开发与运行说明
+- [x] 建立 `src/builtin/**` 目录边界：
+- [x] 将当前 builtin file tools 从 `src/plugins/tools/*` 迁到 `src/builtin/tools/*`
+- [x] 将当前 builtin storage 实现从 `src/plugins/storage/*` 迁到 `src/builtin/storage/*`
+- [x] 将当前 builtin context/runtime internals 从 `src/plugins/context/*` 迁到 `src/builtin/context/*`
+- [x] 收缩 `src/plugins/mod.rs` 的职责，使其只承载真正插件而不是内置模块分类目录
+- [x] 将现有真正插件候选改为一插件一目录：
+- [x] 新增 `PluginManager` 最小版落点：
+- [x] 将 `Application::new()` 从“硬编码注册所有伪插件”重构为：
+- [x] 将 daemon 的 `plugin.*` handler 接到真实 plugin state，而不是 manifest 派生伪状态
+- [x] 为 plugin enable / disable / reload 增加最小回归测试
+- [x] 保持第一阶段范围收敛：
+- [x] 完成后补文档漂移清理：
+- [x] 将当前 builtin tools 从 `read_file` / `list_files` / `shell` 过渡到正式 file tool surface：
+- [x] `read` 支持文本文件读取
+- [x] `read` 支持图片文件读取
+- [x] `read` 支持按 `start_line` / `end_line` 精确读取
+- [x] `read` 输出显式包含 newline 风格：
+- [x] `edit` 支持文本文件区间编辑：
+- [x] 明确并落地 `edit` 的区间语义：
+- [x] `write` 支持创建文本文件并写入内容
+- [x] `write` 支持 `create_dirs=true` 的 `mkdir -p` 语义
+- [x] `write` / `edit` 对 `\n`、LF、CRLF 做统一 runtime 处理
+- [x] 将新 file tools 接入 tool registry、prompt XML、tool calling loop
+- [x] 为核心文件、memory、knowledge 编辑补最小 policy / regression 测试
+- [x] 先对齐 Rig 已有抽象边界，避免重复造轮子：
+- [x] 定义并落地正式 retrieval tool surface：
+- [x] `memory_search` 支持：
+- [x] `memory_get` 支持：
+- [x] `knowledge_search` 支持：
+- [x] `knowledge_get` 支持：
+- [x] 建立稳定引用层：
+- [x] 将当前 context assembly 自动检索逐步改成：
+- [x] 为 retrieval tools 补最小回归测试与 prompt 行为验证
+- [x] 明确 AgentJax 与 Rig 的职责分层，避免重复实现 Rig 已覆盖的层：
+- [x] 让 `PluginManager` 真正消费 `plugins.toml` 的完整语义：
+- [x] 为 plugin runtime state 建立更真实的状态机与错误传播
+- [x] 让 plugin lifecycle 真正接线：
+- [x] 增加 plugin health / failure / dependency diagnostics
+- [x] 为 daemon `plugin.inspect` 补真实内容：
+- [x] 为 `plugin.reload` 接入真实 reload / drain plan，而不是仅做状态翻转
+- [x] 清理 Plugin SDK 文档与代码漂移
+- [x] 为 config loader 增加 validator / normalizer 层
+- [x] 增加 config snapshot 概念与模块子快照
+- [x] 增加 config diff / reload plan 生成
+- [x] 将当前 `src/core/reload.rs` 从壳扩成真实 reload plan 模型
+- [x] 让 `config.reload` 返回真实 affected modules / drain plan
+- [x] 为 plugin enable/disable 变更接入 `DrainAndSwap` 语义
+- [x] 为配置迁移、schema 校验、fragment 引用补回归测试

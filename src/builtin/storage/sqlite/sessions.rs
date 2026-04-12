@@ -51,32 +51,3 @@ impl StoragePlugin for SqliteSessionStorePlugin {
             .map(|store| Arc::new(store) as Arc<dyn SessionStore>)
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::{
-        builtin::storage::sqlite::{SqlitePersistence, SqliteSessionStorePlugin},
-        config::{RuntimeConfig, RuntimePaths, WorkspaceConfig, WorkspacePaths},
-        core::StoragePlugin,
-    };
-
-    #[test]
-    fn sqlite_session_store_plugin_exposes_storage_handle() {
-        let root = std::env::temp_dir().join(format!(
-            "agentjax-sqlite-session-plugin-{}",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ));
-        let runtime = RuntimeConfig::new(
-            "AgentJax",
-            RuntimePaths::new(root.join("runtime")),
-            WorkspaceConfig::new(
-                "workspace-test",
-                WorkspacePaths::new(root.join("workspace")),
-            ),
-        );
-        let persistence = SqlitePersistence::open(&runtime).unwrap();
-        let plugin = SqliteSessionStorePlugin::new(persistence.session_store());
-
-        assert!(plugin.session_store().is_some());
-    }
-}

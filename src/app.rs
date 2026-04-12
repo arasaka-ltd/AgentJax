@@ -140,6 +140,17 @@ fn plugin_candidates(runtime_config: &RuntimeConfig) -> Vec<PluginManagerCandida
                     true,
                 ));
             }
+            crate::config::LlmProviderConfig::Mock(config) => {
+                let plugin = Arc::new(crate::plugins::mock::MockProviderPlugin::new(
+                    config.clone(),
+                ));
+                candidates.push(PluginManagerCandidate::provider(
+                    plugin.clone() as PluginRef,
+                    plugin.clone(),
+                    vec![],
+                    true,
+                ));
+            }
         }
     }
 

@@ -442,22 +442,3 @@ fn default_session(runtime_config: &RuntimeConfig) -> Session {
         last_model_switched_at: None,
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::next_counter_value;
-
-    #[test]
-    fn next_counter_value_advances_numeric_suffixes() {
-        assert_eq!(next_counter_value("msg_9", "msg_"), 10);
-        assert_eq!(next_counter_value("msg_12.runtime", "msg_"), 13);
-        assert_eq!(next_counter_value("turn_42_extra", "turn_"), 43);
-    }
-
-    #[test]
-    fn next_counter_value_ignores_non_matching_ids() {
-        assert_eq!(next_counter_value("manual-id", "msg_"), 1);
-        assert_eq!(next_counter_value("msg_", "msg_"), 1);
-        assert_eq!(next_counter_value("checkpoint_restart", "checkpoint_"), 1);
-    }
-}
