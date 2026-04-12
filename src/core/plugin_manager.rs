@@ -773,7 +773,7 @@ mod tests {
         async fn prompt_turn(
             &self,
             _agent: &crate::config::AgentDefinition,
-            _prompt: &str,
+            _request: crate::core::plugin::ProviderPromptRequest,
         ) -> anyhow::Result<crate::domain::ModelTurnOutput> {
             Ok(crate::domain::ModelTurnOutput {
                 output_id: "out_test".into(),
@@ -786,6 +786,7 @@ mod tests {
                 )],
                 finish_reason: crate::domain::FinishReason::Completed,
                 usage: None,
+                continuation_input_items: Vec::new(),
             })
         }
     }

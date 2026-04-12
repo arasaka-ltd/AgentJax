@@ -32,11 +32,27 @@ struct TuiApp {
     rendered_messages: usize,
 }
 
-#[derive(Default)]
 struct SubmitRenderState {
     streamed_assistant: bool,
     skipped_user: bool,
     skipped_assistant: bool,
+}
+
+impl Default for SubmitRenderState {
+    fn default() -> Self {
+        Self {
+            streamed_assistant: false,
+            skipped_user: true,
+            skipped_assistant: false,
+        }
+    }
+}
+
+#[derive(Default)]
+struct StreamRenderState {
+    streamed_assistant: bool,
+    assistant_started: bool,
+    assistant_ended_with_newline: bool,
 }
 
 impl TuiApp {
@@ -108,20 +124,11 @@ impl TuiApp {
             }),
         };
         let client = UnixSocketClient::new(self.unix_socket.clone(), actor);
-        let mut streamed_assistant = false;
-        let mut assistant_started = false;
-        let mut stream_ended_with_newline = false;
+        let mut stream_state = StreamRenderState::default();
 
         let response = client
             .request_with_streams(request, |stream| {
-                if handle_stream(
-                    stream,
-                    &mut streamed_assistant,
-                    &mut assistant_started,
-                    &mut stream_ended_with_newline,
-                )
-                .is_err()
-                {
+                if handle_stream(stream, &mut stream_state).is_err() {
                     eprintln!(
                         "{}",
                         "warning: failed to render stream chunk"
@@ -132,7 +139,7 @@ impl TuiApp {
             })
             .await;
 
-        if assistant_started && !stream_ended_with_newline {
+        if stream_state.assistant_started && !stream_state.assistant_ended_with_newline {
             println!();
         }
 
@@ -149,13 +156,13 @@ impl TuiApp {
                 self.render_new_messages_from(
                     previous_message_count,
                     SubmitRenderState {
-                        streamed_assistant,
-                        skipped_user: false,
+                        streamed_assistant: stream_state.streamed_assistant,
+                        skipped_user: true,
                         skipped_assistant: false,
                     },
                 );
 
-                if !streamed_assistant && send_response.stream_id.is_some() {
+                if !stream_state.streamed_assistant && send_response.stream_id.is_some() {
                     print_note(
                         "reply completed without visible stream chunks",
                         Color::DarkGrey,
@@ -311,45 +318,85 @@ fn print_labeled_text(label: &str, color: Color, content: &str) {
     println!();
 }
 
-fn handle_stream(
-    stream: &StreamEnvelope,
-    streamed_assistant: &mut bool,
-    assistant_started: &mut bool,
-    stream_ended_with_newline: &mut bool,
-) -> io::Result<()> {
+fn handle_stream(stream: &StreamEnvelope, state: &mut StreamRenderState) -> io::Result<()> {
     match stream.phase {
-        StreamPhase::Start => {}
-        StreamPhase::Chunk => {
-            let Some(text) = stream.data.get("text").and_then(|value| value.as_str()) else {
-                return Ok(());
-            };
-            if !*assistant_started {
-                let label = format!("{:>LABEL_WIDTH$}", "agent")
-                    .with(Color::Green)
-                    .attribute(Attribute::Bold);
-                print!("{label} ");
-                *assistant_started = true;
+        StreamPhase::Start => {
+            if stream.event == "turn.started" {
+                print_note("thinking", Color::DarkGrey);
             }
-            print!("{text}");
-            io::stdout().flush()?;
-            *streamed_assistant = true;
-            *stream_ended_with_newline = text.ends_with('\n');
         }
-        StreamPhase::End => {}
+        StreamPhase::Chunk => match stream.event.as_str() {
+            "assistant.text.delta" => {
+                let Some(text) = stream.data.get("text").and_then(|value| value.as_str()) else {
+                    return Ok(());
+                };
+                if !state.assistant_started {
+                    let label = format!("{:>LABEL_WIDTH$}", "agent")
+                        .with(Color::Green)
+                        .attribute(Attribute::Bold);
+                    print!("{label} ");
+                    state.assistant_started = true;
+                }
+                print!("{text}");
+                io::stdout().flush()?;
+                state.streamed_assistant = true;
+                state.assistant_ended_with_newline = text.ends_with('\n');
+            }
+            "tool_call.started" => {
+                finish_active_assistant_line(state);
+                let tool_name = stream
+                    .data
+                    .get("tool_name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("tool");
+                print_note(format!("using {tool_name}"), Color::Yellow);
+            }
+            "tool_call.completed" => {
+                finish_active_assistant_line(state);
+                let tool_name = stream
+                    .data
+                    .get("tool_name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("tool");
+                print_note(format!("{tool_name} completed"), Color::DarkGrey);
+            }
+            "runtime.waiting" => {
+                finish_active_assistant_line(state);
+                let message = stream
+                    .data
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("task is waiting");
+                print_note(message, Color::DarkGrey);
+            }
+            "assistant.completed" | "turn.completed" => {
+                finish_active_assistant_line(state);
+            }
+            _ => {}
+        },
+        StreamPhase::End => {
+            finish_active_assistant_line(state);
+        }
         StreamPhase::Error => {
+            finish_active_assistant_line(state);
             let message = stream
                 .data
                 .get("message")
                 .and_then(|value| value.as_str())
                 .unwrap_or("stream error");
-            if *assistant_started && !*stream_ended_with_newline {
-                println!();
-            }
             print_note(format!("stream error: {message}"), Color::Red);
         }
     }
 
     Ok(())
+}
+
+fn finish_active_assistant_line(state: &mut StreamRenderState) {
+    if state.assistant_started && !state.assistant_ended_with_newline {
+        println!();
+    }
+    state.assistant_started = false;
+    state.assistant_ended_with_newline = false;
 }
 
 async fn read_prompt_line(prompt: &str) -> Result<Option<String>> {

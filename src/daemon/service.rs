@@ -1301,6 +1301,14 @@ impl Daemon {
                 .messages,
             8,
         );
+        let stream_id = params.stream.then(|| self.store.next_stream_id());
+        if let Some(stream_id) = stream_id.as_deref() {
+            self.register_stream(stream_id, "session.send", StreamStatus::Active);
+        }
+        let mut semantic_stream = stream_id
+            .clone()
+            .map(|stream_id| SemanticStreamBuilder::new(stream_id, &turn_id));
+
         let loop_outcome = self
             .run_tool_loop(
                 &params.session_id,
@@ -1310,6 +1318,7 @@ impl Daemon {
                 &session.session,
                 &assembled_context,
                 prompt_messages,
+                semantic_stream.as_mut(),
             )
             .await
             .map_err(|error| {
@@ -1378,16 +1387,22 @@ impl Daemon {
                     }),
                 )?;
 
-                let followups =
-                    if let Some(stream_id) = params.stream.then(|| self.store.next_stream_id()) {
-                        self.register_stream(&stream_id, "session.send", StreamStatus::Active);
-                        let followups =
-                            build_stream_envelopes(&stream_id, &turn_id, &runtime_message.content);
-                        self.update_stream_status(&stream_id, StreamStatus::Completed);
-                        followups
-                    } else {
-                        Vec::new()
-                    };
+                if let Some(stream) = semantic_stream.as_mut() {
+                    stream.push(
+                        "runtime.waiting",
+                        json!({
+                            "turn_id": turn_id,
+                            "message": runtime_message.content,
+                        }),
+                    );
+                }
+                let followups = semantic_stream
+                    .take()
+                    .map(|stream| stream.finish(&turn_id, "waiting"))
+                    .unwrap_or_default();
+                if let Some(stream_id) = stream_id.as_deref() {
+                    self.update_stream_status(stream_id, StreamStatus::Completed);
+                }
                 let stream_id = if followups.is_empty() {
                     None
                 } else {
@@ -1501,16 +1516,22 @@ impl Daemon {
             }),
         )?;
 
-        let followups = if let Some(stream_id) = params.stream.then(|| self.store.next_stream_id())
-        {
-            self.register_stream(&stream_id, "session.send", StreamStatus::Active);
-            let followups =
-                build_stream_envelopes(&stream_id, &turn_id, &assistant_message.content);
-            self.update_stream_status(&stream_id, StreamStatus::Completed);
-            followups
-        } else {
-            Vec::new()
-        };
+        if let Some(stream) = semantic_stream.as_mut() {
+            stream.push(
+                "assistant.completed",
+                json!({
+                    "turn_id": turn_id,
+                    "message_id": assistant_message.meta.message_id,
+                }),
+            );
+        }
+        let followups = semantic_stream
+            .take()
+            .map(|stream| stream.finish(&turn_id, "completed"))
+            .unwrap_or_default();
+        if let Some(stream_id) = stream_id.as_deref() {
+            self.update_stream_status(stream_id, StreamStatus::Completed);
+        }
         let stream_id = if followups.is_empty() {
             None
         } else {
@@ -2010,6 +2031,7 @@ impl Daemon {
                 &session_record.session,
                 &assembled_context,
                 prompt_messages,
+                None,
             )
             .await?;
 
@@ -2330,77 +2352,74 @@ fn build_tool_followup_prompt(
     build_context_prompt(app, assembled, conversation_messages, true)
 }
 
-fn append_tool_result_messages(
-    app: &Application,
-    conversation_messages: &mut Vec<SessionMessage>,
-    tool_result: &ToolResultItem,
-    session: &Session,
-    next_message_id: String,
-) -> Result<(), ApiError> {
-    let tool_result_content = serde_json::to_string(tool_result).map_err(|error| {
-        ApiError::new(
-            ApiErrorCode::InternalError,
-            format!("failed to serialize tool result item: {error}"),
-            false,
-        )
-    })?;
-    let mut tool_result_message = finalize_message(
-        SessionMessage::tool_result(tool_result_content),
-        session,
-        next_message_id.clone(),
-        Some(vec![
-            SessionMessageAnnotation {
-                kind: "tool_name".into(),
-                value: tool_result.tool_name.clone(),
-            },
-            SessionMessageAnnotation {
-                kind: "tool_call_id".into(),
-                value: tool_result.tool_call_id.clone(),
-            },
-        ]),
-    );
-    tool_result_message.meta.actor_id = Some(app.runtime.default_agent().agent_id.clone());
-    conversation_messages.push(tool_result_message);
-    conversation_messages.push(finalize_message(
-        SessionMessage::runtime(
-            "Continue from the tool result. You may call another tool if needed, or answer the user directly when ready.",
-        ),
-        session,
-        format!("{next_message_id}.runtime"),
-        Some(vec![SessionMessageAnnotation {
-            kind: "phase".into(),
-            value: "after_tool".into(),
-        }]),
-    ));
-    Ok(())
-}
-
-fn append_assistant_context_message(
-    app: &Application,
-    conversation_messages: &mut Vec<SessionMessage>,
-    text: &str,
-    session: &Session,
-    next_message_id: String,
-) {
-    if text.trim().is_empty() {
-        return;
-    }
-    let mut assistant_message = finalize_message(
-        SessionMessage::assistant(text),
-        session,
-        next_message_id,
-        Some(vec![SessionMessageAnnotation {
-            kind: "phase".into(),
-            value: "pre_tool".into(),
-        }]),
-    );
-    assistant_message.meta.actor_id = Some(app.runtime.default_agent().agent_id.clone());
-    conversation_messages.push(assistant_message);
-}
-
 enum ToolLoopOutcome {
     Final(String),
     Sleeping(String),
+}
+
+struct SemanticStreamBuilder {
+    stream_id: String,
+    seq: u64,
+    envelopes: Vec<ServerEnvelope>,
+}
+
+impl SemanticStreamBuilder {
+    fn new(stream_id: String, turn_id: &str) -> Self {
+        let mut builder = Self {
+            stream_id: stream_id.clone(),
+            seq: 0,
+            envelopes: Vec::new(),
+        };
+        builder.push("turn.started", json!({ "turn_id": turn_id }));
+        builder
+    }
+
+    fn push(&mut self, event: &str, data: Value) {
+        self.envelopes.push(ServerEnvelope::Stream(StreamEnvelope {
+            stream_id: self.stream_id.clone().into(),
+            phase: if self.seq == 0 {
+                StreamPhase::Start
+            } else {
+                StreamPhase::Chunk
+            },
+            event: event.into(),
+            seq: self.seq,
+            data,
+            meta: None,
+        }));
+        self.seq += 1;
+    }
+
+    fn push_text(&mut self, turn_id: &str, text: &str) {
+        for chunk in chunk_stream_text(text) {
+            self.push(
+                "assistant.text.delta",
+                json!({
+                    "turn_id": turn_id,
+                    "text": chunk,
+                }),
+            );
+        }
+    }
+
+    fn finish(mut self, turn_id: &str, status: &str) -> Vec<ServerEnvelope> {
+        self.push(
+            "turn.completed",
+            json!({
+                "turn_id": turn_id,
+                "status": status,
+            }),
+        );
+        self.envelopes.push(ServerEnvelope::Stream(StreamEnvelope {
+            stream_id: self.stream_id.into(),
+            phase: StreamPhase::End,
+            event: "stream.completed".into(),
+            seq: self.seq,
+            data: json!({ "turn_id": turn_id, "done": true, "status": status }),
+            meta: None,
+        }));
+        self.envelopes
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2419,10 +2438,18 @@ impl Daemon {
         task_id: &str,
         turn_id: &str,
         session_agent: &crate::config::AgentDefinition,
-        session: &Session,
+        _session: &Session,
         assembled_context: &AssembledContext,
-        mut conversation_messages: Vec<SessionMessage>,
+        conversation_messages: Vec<SessionMessage>,
+        mut stream: Option<&mut SemanticStreamBuilder>,
     ) -> Result<ToolLoopOutcome, ApiError> {
+        let prompt =
+            build_tool_followup_prompt(&self.app, assembled_context, conversation_messages);
+        let mut provider_input_items = vec![json!({
+            "role": "user",
+            "content": prompt,
+        })];
+
         for iteration in 0..=MAX_TOOL_LOOP_STEPS {
             self.record_event(
                 session_id,
@@ -2436,18 +2463,15 @@ impl Daemon {
                     "iteration": iteration,
                 }),
             )?;
-            let prompt = build_tool_followup_prompt(
-                &self.app,
-                assembled_context,
-                conversation_messages.clone(),
-            );
             let response = self
                 .app
                 .runtime
                 .prompt_turn(AgentPromptRequest {
-                    prompt,
+                    prompt: String::new(),
                     agent_id: Some(self.app.runtime.default_agent().agent_id.clone()),
                     agent_override: Some(session_agent.clone()),
+                    tools: self.app.tool_registry.descriptors(),
+                    input_items: provider_input_items.clone(),
                 })
                 .await
                 .map_err(|error| {
@@ -2472,6 +2496,12 @@ impl Daemon {
             )?;
 
             let assistant_text = response.assistant_text();
+            if let Some(stream) = stream.as_deref_mut() {
+                if !assistant_text.trim().is_empty() {
+                    stream.push_text(turn_id, &assistant_text);
+                }
+            }
+            provider_input_items.extend(response.continuation_input_items.clone());
             let tool_calls = collect_tool_calls(
                 &response,
                 session_id,
@@ -2483,14 +2513,6 @@ impl Daemon {
             if tool_calls.is_empty() {
                 return Ok(ToolLoopOutcome::Final(assistant_text));
             }
-
-            append_assistant_context_message(
-                &self.app,
-                &mut conversation_messages,
-                &assistant_text,
-                session,
-                self.store.next_message_id(),
-            );
 
             for tool_call in tool_calls {
                 self.record_event(
@@ -2506,8 +2528,37 @@ impl Daemon {
                         "iteration": iteration,
                     }),
                 )?;
+                if let Some(stream) = stream.as_deref_mut() {
+                    stream.push(
+                        "tool_call.started",
+                        json!({
+                            "turn_id": turn_id,
+                            "tool_call_id": tool_call.tool_call_id,
+                            "tool_name": tool_call.tool_name,
+                            "args": tool_call.args,
+                        }),
+                    );
+                }
                 let tool_result =
                     execute_tool_call_item(&self.execute_tool_call(&tool_call).await?, &tool_call);
+                provider_input_items.push(json!({
+                    "type": "function_call_output",
+                    "call_id": tool_call.tool_call_id,
+                    "output": tool_result.content,
+                }));
+                if let Some(stream) = stream.as_deref_mut() {
+                    stream.push(
+                        "tool_call.completed",
+                        json!({
+                            "turn_id": turn_id,
+                            "tool_call_id": tool_call.tool_call_id,
+                            "tool_name": tool_call.tool_name,
+                            "content": tool_result.content,
+                            "metadata": tool_result.metadata,
+                            "is_error": tool_result.is_error,
+                        }),
+                    );
+                }
                 if let Some(sleep) = parse_sleep_directive(&tool_call, &tool_result)? {
                     self.apply_sleep_directive(session_id, task_id, turn_id, sleep.clone())
                         .await?;
@@ -2519,14 +2570,6 @@ impl Daemon {
                             .unwrap_or_else(|| "The task is now waiting.".into())
                     )));
                 }
-
-                append_tool_result_messages(
-                    &self.app,
-                    &mut conversation_messages,
-                    &tool_result,
-                    session,
-                    self.store.next_message_id(),
-                )?;
             }
         }
 
@@ -2770,6 +2813,7 @@ fn finalize_message(
     message
 }
 
+#[cfg(test)]
 fn build_stream_envelopes(stream_id: &str, turn_id: &str, content: &str) -> Vec<ServerEnvelope> {
     let mut followups = Vec::new();
     followups.push(ServerEnvelope::Stream(StreamEnvelope {
@@ -2929,6 +2973,8 @@ mod tests {
                     "<tools>".to_string(),
                     "<message kind=\\\"user\\\">".to_string(),
                     "<content>show files</content>".to_string(),
+                    "\"type\":\"function\"".to_string(),
+                    "\"tool_choice\":\"auto\"".to_string(),
                 ],
                 format!(
                     r#"{{"id":"resp_1","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{{"type":"output_text","text":"TOOL_CALL {{\"tool\":\"read\",\"args\":{{\"path\":\"{}\",\"start_line\":1,\"end_line\":1}}}}","annotations":[]}}]}}],"tools":[]}}"#,
@@ -2938,8 +2984,9 @@ mod tests {
             (
                 "POST /v1/responses HTTP/1.1".to_string(),
                 vec![
-                    "<message kind=\\\"tool_result\\\">".to_string(),
-                    "Continue from the tool result.".to_string(),
+                    "\"type\":\"function_call_output\"".to_string(),
+                    "\"call_id\":\"msg_1_call_0_read\"".to_string(),
+                    sample_dir.join("a.txt").display().to_string(),
                 ],
                 r#"{"id":"resp_2","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{"id":"msg_2","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"final answer after tool","annotations":[]}]}],"tools":[]}"#.to_string(),
             ),
@@ -3027,6 +3074,107 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn session_send_streams_semantic_events() {
+        let root = temp_path("tool-loop-stream");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&workspace_root).unwrap();
+        let sample_dir = root.join("sample");
+        fs::create_dir_all(&sample_dir).unwrap();
+        fs::write(sample_dir.join("a.txt"), "hello").unwrap();
+
+        let server = spawn_server(vec![
+            (
+                "POST /v1/responses HTTP/1.1".to_string(),
+                vec![
+                    "\"type\":\"function\"".to_string(),
+                    "\"tool_choice\":\"auto\"".to_string(),
+                ],
+                format!(
+                    r#"{{"id":"resp_1","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{{"id":"msg_1","type":"function_call","call_id":"msg_1_call_0_read","name":"read","arguments":"{{\"path\":\"{}\",\"start_line\":1,\"end_line\":1}}"}}],"tools":[]}}"#,
+                    sample_dir.join("a.txt").display()
+                ),
+            ),
+            (
+                "POST /v1/responses HTTP/1.1".to_string(),
+                vec![
+                    "\"type\":\"function_call_output\"".to_string(),
+                    "\"call_id\":\"msg_1_call_0_read\"".to_string(),
+                ],
+                r#"{"id":"resp_2","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{"id":"msg_2","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"final answer after tool","annotations":[]}]}],"tools":[]}"#.to_string(),
+            ),
+        ])
+        .await;
+
+        let mut runtime_config = RuntimeConfig::new(
+            "agentjax-test",
+            crate::config::RuntimePaths::new(root.join("runtime")),
+            crate::config::WorkspaceConfig::new(
+                "default-workspace",
+                WorkspacePaths::new(&workspace_root),
+            ),
+        );
+        runtime_config.agent_runtime.llm.providers =
+            vec![crate::config::LlmProviderConfig::OpenAi(
+                OpenAiProviderConfig {
+                    provider_id: "openai-default".into(),
+                    api_key: Some("test-key".into()),
+                    api_key_env: "OPENAI_API_KEY".into(),
+                    base_url: Some(format!("http://{}", server.0)),
+                    organization: None,
+                    project: None,
+                },
+            )];
+        let identity = WorkspaceIdentityPack {
+            workspace_id: "default-workspace".into(),
+            agent: doc(workspace_root.join("AGENT.md"), ""),
+            soul: doc(workspace_root.join("SOUL.md"), ""),
+            user: doc(workspace_root.join("USER.md"), ""),
+            memory: doc(workspace_root.join("MEMORY.md"), ""),
+            mission: doc(workspace_root.join("MISSION.md"), ""),
+            rules: doc(workspace_root.join("RULES.md"), ""),
+            router: doc(workspace_root.join("ROUTER.md"), ""),
+        };
+        let app = Application::new(
+            ConfigRoot::new(root.join("config")),
+            runtime_config,
+            identity,
+        )
+        .unwrap();
+        let daemon = Daemon::new(app).unwrap();
+
+        let send = daemon
+            .handle_request(RequestEnvelope {
+                id: RequestId("req_send_stream".into()),
+                method: ApiMethod::SessionSend,
+                params: serde_json::json!({
+                    "session_id": "session.default",
+                    "message": { "role": "user", "content": "show files" },
+                    "stream": true,
+                }),
+                meta: None,
+            })
+            .await;
+
+        let events = send
+            .followups
+            .iter()
+            .filter_map(|envelope| match envelope {
+                crate::api::ServerEnvelope::Stream(stream) => Some(stream.event.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(events.contains(&"turn.started"));
+        assert!(events.contains(&"tool_call.started"));
+        assert!(events.contains(&"tool_call.completed"));
+        assert!(events.contains(&"assistant.text.delta"));
+        assert!(events.contains(&"assistant.completed"));
+        assert!(events.contains(&"turn.completed"));
+
+        server.1.abort();
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn stream_chunking_preserves_newlines_and_content() {
         let content = "line one\n- bullet a\n- bullet b\n\nparagraph two";
@@ -3071,6 +3219,7 @@ mod tests {
             ],
             finish_reason: crate::domain::FinishReason::ToolCalls,
             usage: None,
+            continuation_input_items: Vec::new(),
         };
 
         let tool_calls = collect_tool_calls(

@@ -39,6 +39,13 @@ pub struct ModelClient {
     registry: PluginRegistry,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct ProviderPromptRequest {
+    pub prompt: String,
+    pub tools: Vec<ToolDescriptor>,
+    pub input_items: Vec<serde_json::Value>,
+}
+
 impl ModelClient {
     pub fn new(registry: PluginRegistry) -> Self {
         Self { registry }
@@ -155,10 +162,23 @@ pub trait ResourceProviderPlugin: Plugin {
 pub trait ProviderPlugin: Plugin {
     fn provider_id(&self) -> &str;
 
-    async fn prompt_turn(&self, agent: &AgentDefinition, prompt: &str) -> Result<ModelTurnOutput>;
+    async fn prompt_turn(
+        &self,
+        agent: &AgentDefinition,
+        request: ProviderPromptRequest,
+    ) -> Result<ModelTurnOutput>;
 
     async fn prompt_text(&self, agent: &AgentDefinition, prompt: &str) -> Result<String> {
-        Ok(self.prompt_turn(agent, prompt).await?.assistant_text())
+        Ok(self
+            .prompt_turn(
+                agent,
+                ProviderPromptRequest {
+                    prompt: prompt.to_string(),
+                    ..ProviderPromptRequest::default()
+                },
+            )
+            .await?
+            .assistant_text())
     }
 }
 

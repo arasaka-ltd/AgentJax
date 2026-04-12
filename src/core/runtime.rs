@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 
 use crate::config::{AgentDefinition, RuntimeConfig};
-use crate::core::{PluginHost, WorkspaceRuntimeHost};
+use crate::core::{plugin::ProviderPromptRequest, PluginHost, WorkspaceRuntimeHost};
 use crate::domain::ModelTurnOutput;
 
 #[derive(Clone)]
@@ -16,6 +16,8 @@ pub struct AgentPromptRequest {
     pub prompt: String,
     pub agent_id: Option<String>,
     pub agent_override: Option<AgentDefinition>,
+    pub tools: Vec<crate::builtin::tools::ToolDescriptor>,
+    pub input_items: Vec<serde_json::Value>,
 }
 
 impl ApplicationRuntime {
@@ -60,7 +62,14 @@ impl ApplicationRuntime {
             None => self.resolve_agent(request.agent_id.as_deref())?,
         };
         self.resolve_provider(&agent.provider_id)?
-            .prompt_turn(agent, &request.prompt)
+            .prompt_turn(
+                agent,
+                ProviderPromptRequest {
+                    prompt: request.prompt,
+                    tools: request.tools,
+                    input_items: request.input_items,
+                },
+            )
             .await
     }
 

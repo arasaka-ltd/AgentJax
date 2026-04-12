@@ -11,7 +11,10 @@ use crate::{
         AgentDefinition, ModelCatalogSnapshot, ModelInfoSnapshot, OpenAiProviderConfig,
         ProviderModelCatalog,
     },
-    core::{BillingPlugin, Plugin, PluginContext, ProviderPlugin, ResourceProviderPlugin},
+    core::{
+        plugin::ProviderPromptRequest, BillingPlugin, Plugin, PluginContext, ProviderPlugin,
+        ResourceProviderPlugin,
+    },
     domain::{
         AssistantTextItem, BillingBreakdownItem, BillingCapability, BillingConfidence, BillingMode,
         BillingRecord, FinishReason, ModelOutputItem, ModelTurnOutput, ModelUsage, Permission,
@@ -232,13 +235,13 @@ impl OpenAiProviderAdapter {
     pub async fn prompt_turn(
         &self,
         agent: &AgentDefinition,
-        prompt: &str,
+        request: ProviderPromptRequest,
     ) -> Result<ModelTurnOutput> {
         let client = reqwest::Client::builder().build()?;
         let response = client
             .post(self.config.endpoint_url("responses"))
             .headers(self.request_headers()?)
-            .json(&self.responses_request_body(agent, prompt))
+            .json(&self.responses_request_body(agent, &request))
             .send()
             .await?;
         if !response.status().is_success() {
@@ -247,12 +250,27 @@ impl OpenAiProviderAdapter {
             return Err(anyhow!("openai prompt failed: status {status} body {body}"));
         }
 
-        let payload: OpenAiResponsesApiResponse = response.json().await?;
-        normalize_model_turn_output(payload)
+        let payload: Value = response.json().await?;
+        let normalized: OpenAiResponsesApiResponse = serde_json::from_value(payload.clone())?;
+        let continuation_input_items = payload
+            .get("output")
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        normalize_model_turn_output(normalized, continuation_input_items)
     }
 
     pub async fn prompt_text(&self, agent: &AgentDefinition, prompt: &str) -> Result<String> {
-        Ok(self.prompt_turn(agent, prompt).await?.assistant_text())
+        Ok(self
+            .prompt_turn(
+                agent,
+                ProviderPromptRequest {
+                    prompt: prompt.to_string(),
+                    ..ProviderPromptRequest::default()
+                },
+            )
+            .await?
+            .assistant_text())
     }
 
     fn request_headers(&self) -> Result<ReqwestHeaderMap> {
@@ -274,10 +292,22 @@ impl OpenAiProviderAdapter {
         Ok(headers)
     }
 
-    fn responses_request_body(&self, agent: &AgentDefinition, prompt: &str) -> Value {
+    fn responses_request_body(
+        &self,
+        agent: &AgentDefinition,
+        request: &ProviderPromptRequest,
+    ) -> Value {
+        let input = if request.input_items.is_empty() {
+            json!([{
+                "role": "user",
+                "content": request.prompt,
+            }])
+        } else {
+            Value::Array(request.input_items.clone())
+        };
         let mut body = json!({
             "model": agent.model,
-            "input": prompt,
+            "input": input,
         });
         if let Some(preamble) = &agent.preamble {
             body["instructions"] = Value::String(preamble.clone());
@@ -288,11 +318,33 @@ impl OpenAiProviderAdapter {
         if let Some(max_tokens) = agent.max_tokens {
             body["max_output_tokens"] = json!(max_tokens);
         }
+        if !request.tools.is_empty() {
+            body["tools"] = Value::Array(
+                request
+                    .tools
+                    .iter()
+                    .map(|tool| {
+                        json!({
+                            "type": "function",
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": tool.arguments_schema,
+                            "strict": false,
+                        })
+                    })
+                    .collect(),
+            );
+            body["tool_choice"] = json!("auto");
+            body["parallel_tool_calls"] = json!(false);
+        }
         body
     }
 }
 
-fn normalize_model_turn_output(payload: OpenAiResponsesApiResponse) -> Result<ModelTurnOutput> {
+fn normalize_model_turn_output(
+    payload: OpenAiResponsesApiResponse,
+    continuation_input_items: Vec<Value>,
+) -> Result<ModelTurnOutput> {
     let mut items = Vec::new();
 
     for (index, item) in payload.output.into_iter().enumerate() {
@@ -367,6 +419,7 @@ fn normalize_model_turn_output(payload: OpenAiResponsesApiResponse) -> Result<Mo
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
         }),
+        continuation_input_items,
     })
 }
 
@@ -504,9 +557,13 @@ impl ProviderPlugin for OpenAiProviderPlugin {
         &self.config.provider_id
     }
 
-    async fn prompt_turn(&self, agent: &AgentDefinition, prompt: &str) -> Result<ModelTurnOutput> {
+    async fn prompt_turn(
+        &self,
+        agent: &AgentDefinition,
+        request: ProviderPromptRequest,
+    ) -> Result<ModelTurnOutput> {
         OpenAiProviderAdapter::new(self.config.clone())
-            .prompt_turn(agent, prompt)
+            .prompt_turn(agent, request)
             .await
     }
 }
@@ -633,6 +690,7 @@ fn normalize_model_info(model_id: &str) -> ModelInfoSnapshot {
 mod tests {
     use std::net::SocketAddr;
 
+    use serde_json::json;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -645,7 +703,9 @@ mod tests {
         OpenAiResponsesContentItem, OpenAiResponsesOutputItem,
     };
     use crate::{
+        builtin::tools::ToolDescriptor,
         config::AgentDefinition,
+        core::plugin::ProviderPromptRequest,
         domain::{ModelOutputItem, ToolCallItem},
     };
 
@@ -761,7 +821,7 @@ mod tests {
                     ),
                 }],
             }],
-        })
+        }, Vec::new())
         .unwrap();
 
         assert_eq!(output.items.len(), 2);
@@ -773,6 +833,43 @@ mod tests {
             output.items[1],
             ModelOutputItem::ToolCall(ToolCallItem { .. })
         ));
+    }
+
+    #[test]
+    fn responses_request_body_includes_native_function_tools_and_input_items() {
+        let adapter = OpenAiProviderAdapter::new(OpenAiProviderConfig::default());
+        let body = adapter.responses_request_body(
+            &AgentDefinition::default(),
+            &ProviderPromptRequest {
+                prompt: "ignored when input_items are present".into(),
+                tools: vec![ToolDescriptor {
+                    name: "read".into(),
+                    description: "Read a file".into(),
+                    when_to_use: String::new(),
+                    when_not_to_use: String::new(),
+                    arguments_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "string" }
+                        },
+                        "required": ["path"]
+                    }),
+                    default_timeout_secs: 5,
+                    idempotent: true,
+                }],
+                input_items: vec![json!({
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "{\"ok\":true}"
+                })],
+            },
+        );
+
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "read");
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], false);
+        assert_eq!(body["input"][0]["type"], "function_call_output");
     }
 
     async fn spawn_server(
