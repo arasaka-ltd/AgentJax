@@ -49,6 +49,9 @@ pub struct Task {
     pub priority: TaskPriority,
     pub goal: String,
     pub checkpoint_ref: Option<String>,
+    pub waiting_until: Option<chrono::DateTime<chrono::Utc>>,
+    pub waiting_reason: Option<String>,
+    pub waiting_resume_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 
@@ -44,6 +44,7 @@ use crate::{
 
 pub const API_VERSION: &str = "v1";
 pub const SCHEMA_VERSION: &str = "2026-04-10";
+const MAX_TOOL_LOOP_STEPS: usize = 8;
 
 #[derive(Clone)]
 pub struct Daemon {
@@ -58,6 +59,7 @@ struct ControlPlaneState {
     subscriptions: BTreeMap<String, RegisteredSubscription>,
     streams: BTreeMap<String, RegisteredStream>,
     logs: Vec<String>,
+    resuming_tasks: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,11 +99,13 @@ impl Dispatch {
 impl Daemon {
     pub fn new(app: Application) -> anyhow::Result<Self> {
         let runtime_config = app.runtime_config.clone();
-        Ok(Self {
+        let daemon = Self {
             app: Arc::new(app),
             store: Arc::new(DaemonStore::new(runtime_config)?),
             control: Arc::new(Mutex::new(ControlPlaneState::default())),
-        })
+        };
+        daemon.spawn_waiting_task_scheduler();
+        Ok(daemon)
     }
 
     pub fn connection_id(&self) -> ConnectionId {
@@ -1192,6 +1196,9 @@ impl Daemon {
             priority: crate::domain::TaskPriority::Normal,
             goal: user_message.content.clone(),
             checkpoint_ref: None,
+            waiting_until: None,
+            waiting_reason: None,
+            waiting_resume_hint: None,
         };
         self.store
             .create_task(task.clone())
@@ -1293,25 +1300,25 @@ impl Daemon {
                 .messages,
             8,
         );
-
-        let prompt =
-            build_context_prompt(&self.app, &assembled_context, prompt_messages.clone(), true);
-        let first_response = self
-            .app
-            .runtime
-            .prompt_text(AgentPromptRequest {
-                prompt,
-                agent_id: Some(self.app.runtime.default_agent().agent_id.clone()),
-                agent_override: Some(session_agent.clone()),
-            })
+        let loop_outcome = self
+            .run_tool_loop(
+                &params.session_id,
+                &task_id,
+                &turn_id,
+                &session_agent,
+                &session.session,
+                &assembled_context,
+                prompt_messages,
+            )
             .await
             .map_err(|error| {
+                let error_message = error.message.clone();
                 let _ = self.record_event(
                     &params.session_id,
                     &turn_id,
                     Some(&task_id),
                     EventType::TurnFailed,
-                    json!({ "error": error.to_string() }),
+                    json!({ "error": error_message }),
                 );
                 task.status = TaskStatus::Failed;
                 task.meta.updated_at = Utc::now();
@@ -1322,7 +1329,7 @@ impl Daemon {
                     TaskStatus::Failed,
                     Some(&turn_id),
                     None,
-                    format!("model call failed: {error}"),
+                    format!("tool loop failed: {}", error.message),
                 );
                 let _ = self.record_event(
                     &params.session_id,
@@ -1331,80 +1338,74 @@ impl Daemon {
                     EventType::TaskFailed,
                     json!({
                         "task_id": task_id,
-                        "error": error.to_string(),
+                        "error": error.message.clone(),
                     }),
                 );
                 ApiError::new(
                     ApiErrorCode::InternalError,
-                    format!("session.send failed: {error}"),
+                    format!("session.send failed: {}", error.message),
                     false,
                 )
             })?;
-        self.record_event(
-            &params.session_id,
-            &turn_id,
-            Some(&task_id),
-            EventType::ModelResponseReceived,
-            json!({ "message": first_response }),
-        )?;
 
-        let assistant_text = if let Some(tool_call) = parse_tool_call(
-            &first_response,
-            &params.session_id,
-            &task_id,
-            &turn_id,
-            &session_agent.agent_id,
-        )? {
-            let tool_result = self.execute_tool_call(&tool_call).await?;
-            let followup_prompt = build_tool_followup_prompt(
-                &self.app,
-                &assembled_context,
-                prompt_messages,
-                &tool_call,
-                &tool_result,
-                &session.session,
-                self.store.next_message_id(),
-            );
-            self.record_event(
-                &params.session_id,
-                &turn_id,
-                Some(&task_id),
-                EventType::ModelCalled,
-                json!({
-                    "provider_id": session_agent.provider_id.clone(),
-                    "model_id": session_agent.model.clone(),
-                    "phase": "after_tool",
-                }),
-            )?;
-            let second_response = self
-                .app
-                .runtime
-                .prompt_text(AgentPromptRequest {
-                    prompt: followup_prompt,
-                    agent_id: Some(self.app.runtime.default_agent().agent_id.clone()),
-                    agent_override: Some(session_agent.clone()),
-                })
-                .await
-                .map_err(|error| {
-                    ApiError::new(
-                        ApiErrorCode::InternalError,
-                        format!("tool follow-up model call failed: {error}"),
-                        false,
+        let assistant_text = match loop_outcome {
+            ToolLoopOutcome::Final(text) => text,
+            ToolLoopOutcome::Sleeping(runtime_message) => {
+                let mut runtime_message = finalize_message(
+                    SessionMessage::runtime(runtime_message.clone()),
+                    &session.session,
+                    self.store.next_message_id(),
+                    Some(vec![SessionMessageAnnotation {
+                        kind: "runtime_control".into(),
+                        value: "sleep".into(),
+                    }]),
+                );
+                runtime_message.meta.actor_id = Some(session_agent.agent_id.clone());
+                self.store
+                    .append_message(&params.session_id, &turn_id, runtime_message.clone())
+                    .map_err(map_store_error)?;
+                self.record_event(
+                    &params.session_id,
+                    &turn_id,
+                    Some(&task_id),
+                    EventType::TurnSucceeded,
+                    json!({
+                        "turn_id": turn_id,
+                        "task_id": task_id,
+                        "runtime_message": runtime_message,
+                        "waiting": true,
+                    }),
+                )?;
+
+                let followups =
+                    if let Some(stream_id) = params.stream.then(|| self.store.next_stream_id()) {
+                        self.register_stream(&stream_id, "session.send", StreamStatus::Active);
+                        let followups =
+                            build_stream_envelopes(&stream_id, &turn_id, &runtime_message.content);
+                        self.update_stream_status(&stream_id, StreamStatus::Completed);
+                        followups
+                    } else {
+                        Vec::new()
+                    };
+                let stream_id = if followups.is_empty() {
+                    None
+                } else {
+                    Some(
+                        followups[0]
+                            .stream_id()
+                            .expect("stream envelope id exists")
+                            .into(),
                     )
-                })?;
-            self.record_event(
-                &params.session_id,
-                &turn_id,
-                Some(&task_id),
-                EventType::ModelResponseReceived,
-                json!({
-                    "message": second_response,
-                    "phase": "after_tool",
-                }),
-            )?;
-            second_response
-        } else {
-            first_response
+                };
+                return Ok((
+                    self.serialize(SessionSendResponse {
+                        accepted: true,
+                        turn_id,
+                        stream_id,
+                    })?,
+                    followups,
+                ));
+            }
         };
 
         let mut assistant_message = finalize_message(
@@ -1828,6 +1829,299 @@ impl Daemon {
             payload,
         )
     }
+
+    fn spawn_waiting_task_scheduler(&self) {
+        let daemon = self.clone();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                loop {
+                    daemon.resume_ready_waiting_tasks().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            });
+        }
+    }
+
+    async fn resume_ready_waiting_tasks(&self) {
+        let now = Utc::now();
+        let records = match self.store.list_tasks() {
+            Ok(records) => records,
+            Err(error) => {
+                self.push_log(format!("waiting task scan failed: {error}"));
+                return;
+            }
+        };
+
+        for record in records {
+            if record.task.status != TaskStatus::Waiting {
+                continue;
+            }
+            let Some(waiting_until) = record.task.waiting_until else {
+                continue;
+            };
+            if waiting_until > now {
+                continue;
+            }
+            let task_id = record.task.task_id.clone();
+            {
+                let mut control = self.control.lock().expect("control plane lock poisoned");
+                if !control.resuming_tasks.insert(task_id.clone()) {
+                    continue;
+                }
+            }
+            let daemon = self.clone();
+            tokio::spawn(async move {
+                let _ = daemon.resume_waiting_task(task_id.clone()).await;
+                daemon
+                    .control
+                    .lock()
+                    .expect("control plane lock poisoned")
+                    .resuming_tasks
+                    .remove(&task_id);
+            });
+        }
+    }
+
+    async fn resume_waiting_task(&self, task_id: String) -> Result<(), ApiError> {
+        let record = self
+            .store
+            .get_task(&task_id)
+            .map_err(internal_store_error)?
+            .ok_or_else(task_not_found)?;
+        if record.task.status != TaskStatus::Waiting {
+            return Ok(());
+        }
+        let session_id = record
+            .task
+            .session_id
+            .clone()
+            .ok_or_else(|| ApiError::new(ApiErrorCode::InternalError, "waiting task missing session_id", false))?;
+        let session_record = self
+            .store
+            .get_session(&session_id)
+            .map_err(internal_store_error)?
+            .ok_or_else(session_not_found)?;
+        let session_agent = self
+            .app
+            .runtime
+            .session_agent(
+                session_record.session.current_provider_id.as_deref(),
+                session_record.session.current_model_id.as_deref(),
+            )
+            .map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::InternalError,
+                    format!("failed to resolve session model: {error}"),
+                    false,
+                )
+            })?;
+        let turn_id = self.store.next_turn_id();
+
+        let mut task = record.task.clone();
+        let resume_reason = task.waiting_reason.clone();
+        let resume_hint = task.waiting_resume_hint.clone();
+        task.status = TaskStatus::Running;
+        task.waiting_until = None;
+        task.waiting_reason = None;
+        task.waiting_resume_hint = None;
+        task.meta.updated_at = Utc::now();
+        self.store
+            .update_task(task.clone())
+            .map_err(internal_store_error)?;
+        self.store
+            .append_task_timeline(
+                &task_id,
+                crate::domain::TaskPhase::Running,
+                TaskStatus::Running,
+                Some(&turn_id),
+                None,
+                "waiting task resumed by runtime scheduler",
+            )
+            .map_err(internal_store_error)?;
+        self.record_event(
+            &session_id,
+            &turn_id,
+            Some(&task_id),
+            EventType::TaskResumed,
+            json!({
+                "task_id": task_id,
+                "turn_id": turn_id,
+                "reason": resume_reason,
+                "resume_hint": resume_hint,
+            }),
+        )?;
+
+        let mut resume_message = finalize_message(
+            SessionMessage::runtime(format!(
+                "Resume the waiting task now. {} {}",
+                resume_reason
+                    .as_deref()
+                    .map(|value| format!("Reason: {value}."))
+                    .unwrap_or_default(),
+                resume_hint
+                    .as_deref()
+                    .map(|value| format!("Next step hint: {value}."))
+                    .unwrap_or_default()
+            )),
+            &session_record.session,
+            self.store.next_message_id(),
+            Some(vec![SessionMessageAnnotation {
+                kind: "runtime_control".into(),
+                value: "task_resumed".into(),
+            }]),
+        );
+        resume_message.meta.actor_id = Some(session_agent.agent_id.clone());
+        self.store
+            .append_message(&session_id, &turn_id, resume_message.clone())
+            .map_err(map_store_error)?;
+
+        let assembled_context = self
+            .app
+            .context_engine
+            .assemble_context(ContextAssemblyRequest {
+                session_id: Some(session_id.clone()),
+                task_id: Some(task_id.clone()),
+                budget_tokens: 8_000,
+                purpose: ContextAssemblyPurpose::Chat,
+                model_profile: None,
+                retrieval_scope: crate::builtin::context::retrieval_types::RetrievalScope::Implicit,
+            })
+            .map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::InternalError,
+                    format!("context assembly failed during resume: {error}"),
+                    false,
+                )
+            })?;
+        let prompt_messages = recent_prompt_messages(
+            &self
+                .store
+                .get_session(&session_id)
+                .map_err(internal_store_error)?
+                .ok_or_else(session_not_found)?
+                .messages,
+            8,
+        );
+        let outcome = self
+            .run_tool_loop(
+                &session_id,
+                &task_id,
+                &turn_id,
+                &session_agent,
+                &session_record.session,
+                &assembled_context,
+                prompt_messages,
+            )
+            .await?;
+
+        match outcome {
+            ToolLoopOutcome::Final(text) => {
+                let mut assistant_message = finalize_message(
+                    SessionMessage::assistant(text),
+                    &session_record.session,
+                    self.store.next_message_id(),
+                    None,
+                );
+                assistant_message.meta.actor_id = Some(session_agent.agent_id.clone());
+                self.store
+                    .append_message(&session_id, &turn_id, assistant_message.clone())
+                    .map_err(map_store_error)?;
+                let checkpoint = self
+                    .app
+                    .context_engine
+                    .build_resume_pack(Some(&session_id), Some(&task_id))
+                    .map_err(|error| {
+                        ApiError::new(
+                            ApiErrorCode::InternalError,
+                            format!("resume pack build failed during resume completion: {error}"),
+                            false,
+                        )
+                    })?;
+                self.store
+                    .write_task_checkpoint(
+                        &task_id,
+                        Some(&session_id),
+                        Some(&turn_id),
+                        assistant_message.content.clone(),
+                        checkpoint,
+                    )
+                    .map_err(internal_store_error)?;
+                task.status = TaskStatus::Succeeded;
+                task.checkpoint_ref = self
+                    .store
+                    .get_task(&task_id)
+                    .map_err(internal_store_error)?
+                    .and_then(|record| record.task.checkpoint_ref);
+                task.meta.updated_at = Utc::now();
+                self.store
+                    .update_task(task.clone())
+                    .map_err(internal_store_error)?;
+                self.store
+                    .append_task_timeline(
+                        &task_id,
+                        crate::domain::TaskPhase::Succeeded,
+                        TaskStatus::Succeeded,
+                        Some(&turn_id),
+                        None,
+                        "resumed task completed successfully",
+                    )
+                    .map_err(internal_store_error)?;
+                self.record_event(
+                    &session_id,
+                    &turn_id,
+                    Some(&task_id),
+                    EventType::TaskSucceeded,
+                    json!({
+                        "task_id": task_id,
+                        "checkpoint_ref": task.checkpoint_ref,
+                        "resumed": true,
+                    }),
+                )?;
+                self.record_event(
+                    &session_id,
+                    &turn_id,
+                    Some(&task_id),
+                    EventType::TurnSucceeded,
+                    json!({
+                        "turn_id": turn_id,
+                        "task_id": task_id,
+                        "assistant_message": assistant_message,
+                        "resumed": true,
+                    }),
+                )?;
+            }
+            ToolLoopOutcome::Sleeping(runtime_message) => {
+                let mut runtime_message = finalize_message(
+                    SessionMessage::runtime(runtime_message),
+                    &session_record.session,
+                    self.store.next_message_id(),
+                    Some(vec![SessionMessageAnnotation {
+                        kind: "runtime_control".into(),
+                        value: "sleep".into(),
+                    }]),
+                );
+                runtime_message.meta.actor_id = Some(session_agent.agent_id.clone());
+                self.store
+                    .append_message(&session_id, &turn_id, runtime_message.clone())
+                    .map_err(map_store_error)?;
+                self.record_event(
+                    &session_id,
+                    &turn_id,
+                    Some(&task_id),
+                    EventType::TurnSucceeded,
+                    json!({
+                        "turn_id": turn_id,
+                        "task_id": task_id,
+                        "runtime_message": runtime_message,
+                        "waiting": true,
+                        "resumed": true,
+                    }),
+                )?;
+            }
+        }
+
+        Ok(())
+    }
 }
 
 fn shell_tool_started_event(tool_call: &ToolCall) -> Option<(EventType, Value)> {
@@ -2038,12 +2332,19 @@ fn build_context_prompt(
 fn build_tool_followup_prompt(
     app: &Application,
     assembled: &AssembledContext,
-    mut conversation_messages: Vec<SessionMessage>,
+    conversation_messages: Vec<SessionMessage>,
+) -> String {
+    build_context_prompt(app, assembled, conversation_messages, true)
+}
+
+fn append_tool_result_messages(
+    app: &Application,
+    conversation_messages: &mut Vec<SessionMessage>,
     tool_call: &ToolCall,
     tool_result: &str,
     session: &Session,
     next_message_id: String,
-) -> String {
+) {
     let mut tool_result_message = finalize_message(
         SessionMessage::tool_result(tool_result),
         session,
@@ -2063,7 +2364,7 @@ fn build_tool_followup_prompt(
     conversation_messages.push(tool_result_message);
     conversation_messages.push(finalize_message(
         SessionMessage::runtime(
-            "Answer the user directly using the tool result. Do not request another tool.",
+            "Continue from the tool result. You may call another tool if needed, or answer the user directly when ready.",
         ),
         session,
         format!("{next_message_id}.runtime"),
@@ -2072,7 +2373,242 @@ fn build_tool_followup_prompt(
             value: "after_tool".into(),
         }]),
     ));
-    build_context_prompt(app, assembled, conversation_messages, false)
+}
+
+enum ToolLoopOutcome {
+    Final(String),
+    Sleeping(String),
+}
+
+#[derive(Debug, Clone)]
+struct SleepDirective {
+    wake_at: chrono::DateTime<chrono::Utc>,
+    reason: Option<String>,
+    resume_hint: Option<String>,
+    duration_ms: Option<i64>,
+}
+
+impl Daemon {
+    #[allow(clippy::too_many_arguments)]
+    async fn run_tool_loop(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        turn_id: &str,
+        session_agent: &crate::config::AgentDefinition,
+        session: &Session,
+        assembled_context: &AssembledContext,
+        mut conversation_messages: Vec<SessionMessage>,
+    ) -> Result<ToolLoopOutcome, ApiError> {
+        for iteration in 0..=MAX_TOOL_LOOP_STEPS {
+            self.record_event(
+                session_id,
+                turn_id,
+                Some(task_id),
+                EventType::ModelCalled,
+                json!({
+                    "provider_id": session_agent.provider_id.clone(),
+                    "model_id": session_agent.model.clone(),
+                    "phase": if iteration == 0 { "initial" } else { "tool_loop" },
+                    "iteration": iteration,
+                }),
+            )?;
+            let prompt =
+                build_tool_followup_prompt(&self.app, assembled_context, conversation_messages.clone());
+            let response = self
+                .app
+                .runtime
+                .prompt_text(AgentPromptRequest {
+                    prompt,
+                    agent_id: Some(self.app.runtime.default_agent().agent_id.clone()),
+                    agent_override: Some(session_agent.clone()),
+                })
+                .await
+                .map_err(|error| {
+                    ApiError::new(
+                        ApiErrorCode::InternalError,
+                        format!("model call failed in tool loop: {error}"),
+                        false,
+                    )
+                })?;
+            self.record_event(
+                session_id,
+                turn_id,
+                Some(task_id),
+                EventType::ModelResponseReceived,
+                json!({
+                    "message": response,
+                    "iteration": iteration,
+                }),
+            )?;
+
+            let Some(tool_call) =
+                parse_tool_call(&response, session_id, task_id, turn_id, &session_agent.agent_id)?
+            else {
+                return Ok(ToolLoopOutcome::Final(response));
+            };
+
+            let tool_result = self.execute_tool_call(&tool_call).await?;
+            if let Some(sleep) = parse_sleep_directive(&tool_call, &tool_result)? {
+                self.apply_sleep_directive(session_id, task_id, turn_id, sleep.clone())
+                    .await?;
+                return Ok(ToolLoopOutcome::Sleeping(format!(
+                    "Runtime scheduled resume at {}. {}",
+                    sleep.wake_at.to_rfc3339(),
+                    sleep
+                        .resume_hint
+                        .unwrap_or_else(|| "The task is now waiting.".into())
+                )));
+            }
+
+            append_tool_result_messages(
+                &self.app,
+                &mut conversation_messages,
+                &tool_call,
+                &tool_result,
+                session,
+                self.store.next_message_id(),
+            );
+        }
+
+        Err(ApiError::new(
+            ApiErrorCode::InternalError,
+            format!("tool loop exceeded max iterations ({MAX_TOOL_LOOP_STEPS})"),
+            false,
+        ))
+    }
+
+    async fn apply_sleep_directive(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        turn_id: &str,
+        sleep: SleepDirective,
+    ) -> Result<(), ApiError> {
+        self.record_event(
+            session_id,
+            turn_id,
+            Some(task_id),
+            EventType::SleepRequested,
+            json!({
+                "task_id": task_id,
+                "turn_id": turn_id,
+                "wake_at": sleep.wake_at,
+                "reason": sleep.reason,
+                "resume_hint": sleep.resume_hint,
+                "duration_ms": sleep.duration_ms,
+            }),
+        )?;
+
+        let checkpoint = self
+            .app
+            .context_engine
+            .build_resume_pack(Some(session_id), Some(task_id))
+            .map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::InternalError,
+                    format!("resume pack build failed: {error}"),
+                    false,
+                )
+            })?;
+        self.store
+            .write_task_checkpoint(
+                task_id,
+                Some(session_id),
+                Some(turn_id),
+                sleep
+                    .resume_hint
+                    .clone()
+                    .unwrap_or_else(|| format!("wake at {}", sleep.wake_at.to_rfc3339())),
+                checkpoint,
+            )
+            .map_err(internal_store_error)?;
+
+        let mut task = self
+            .store
+            .get_task(task_id)
+            .map_err(internal_store_error)?
+            .ok_or_else(task_not_found)?;
+        task.task.status = TaskStatus::Waiting;
+        task.task.waiting_until = Some(sleep.wake_at);
+        task.task.waiting_reason = sleep.reason.clone();
+        task.task.waiting_resume_hint = sleep.resume_hint.clone();
+        task.task.meta.updated_at = Utc::now();
+        self.store
+            .update_task(task.task.clone())
+            .map_err(internal_store_error)?;
+        self.store
+            .append_task_timeline(
+                task_id,
+                crate::domain::TaskPhase::Waiting,
+                TaskStatus::Waiting,
+                Some(turn_id),
+                None,
+                format!(
+                    "runtime sleep scheduled until {} ({})",
+                    sleep.wake_at.to_rfc3339(),
+                    sleep.reason.unwrap_or_else(|| "no reason provided".into())
+                ),
+            )
+            .map_err(internal_store_error)?;
+        self.record_event(
+            session_id,
+            turn_id,
+            Some(task_id),
+            EventType::TaskWaiting,
+            json!({
+                "task_id": task_id,
+                "turn_id": turn_id,
+                "wake_at": sleep.wake_at,
+                "resume_hint": sleep.resume_hint,
+            }),
+        )?;
+        Ok(())
+    }
+}
+
+fn parse_sleep_directive(
+    tool_call: &ToolCall,
+    tool_result: &str,
+) -> Result<Option<SleepDirective>, ApiError> {
+    if tool_call.tool_name != "sleep" {
+        return Ok(None);
+    }
+    let value: Value = serde_json::from_str(tool_result).map_err(|error| {
+        ApiError::new(
+            ApiErrorCode::InternalError,
+            format!("invalid sleep tool output: {error}"),
+            false,
+        )
+    })?;
+    let wake_at = value
+        .get("wake_at")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            ApiError::new(
+                ApiErrorCode::InternalError,
+                "sleep tool output missing wake_at",
+                false,
+            )
+        })?;
+    let wake_at = chrono::DateTime::parse_from_rfc3339(wake_at)
+        .map_err(|error| {
+            ApiError::new(
+                ApiErrorCode::InternalError,
+                format!("invalid sleep wake_at: {error}"),
+                false,
+            )
+        })?
+        .with_timezone(&Utc);
+    Ok(Some(SleepDirective {
+        wake_at,
+        reason: value.get("reason").and_then(|value| value.as_str()).map(str::to_string),
+        resume_hint: value
+            .get("resume_hint")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        duration_ms: value.get("duration_ms").and_then(|value| value.as_i64()),
+    }))
 }
 
 fn recent_prompt_messages(messages: &[SessionMessage], limit: usize) -> Vec<SessionMessage> {
@@ -2250,6 +2786,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    use chrono::Utc;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -2272,7 +2809,7 @@ mod tests {
         domain::{ExecutionMode, ObjectMeta, Schedule, Task, TaskStatus},
     };
 
-    use super::Daemon;
+    use super::{Daemon, SleepDirective};
 
     #[tokio::test]
     async fn session_send_runs_tool_loop_and_records_tool_events() {
@@ -2301,7 +2838,7 @@ mod tests {
                 "POST /v1/responses HTTP/1.1".to_string(),
                 vec![
                     "<message kind=\\\"tool_result\\\">".to_string(),
-                    "Answer the user directly using the tool result.".to_string(),
+                    "Continue from the tool result.".to_string(),
                 ],
                 r#"{"id":"resp_2","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{"id":"msg_2","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"final answer after tool","annotations":[]}]}],"tools":[]}"#.to_string(),
             ),
@@ -2607,6 +3144,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sleep_directive_marks_task_waiting_with_wake_metadata() {
+        let root = temp_path("sleep-waiting");
+        let workspace_root = root.join("workspace");
+        fs::create_dir_all(&workspace_root).unwrap();
+
+        let daemon = Daemon::new(
+            Application::new(
+                ConfigRoot::new(root.join("config")),
+                test_runtime_config(&root, &workspace_root, Some("http://127.0.0.1:1".into())),
+                test_identity(&workspace_root),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        daemon
+            .store
+            .create_task(Task {
+                meta: ObjectMeta::new("task_sleep", "2026-04-10"),
+                task_id: "task_sleep".into(),
+                workspace_id: "default-workspace".into(),
+                agent_id: Some("default-agent".into()),
+                session_id: Some("session.default".into()),
+                parent_task_id: None,
+                definition_ref: None,
+                execution_mode: ExecutionMode::BoundSession,
+                status: TaskStatus::Running,
+                priority: crate::domain::TaskPriority::Normal,
+                goal: "wait".into(),
+                checkpoint_ref: None,
+                waiting_until: None,
+                waiting_reason: None,
+                waiting_resume_hint: None,
+            })
+            .unwrap();
+
+        daemon
+            .apply_sleep_directive(
+                "session.default",
+                "task_sleep",
+                "turn_sleep",
+                SleepDirective {
+                    wake_at: Utc::now() + chrono::Duration::seconds(5),
+                    reason: Some("wait for shell output".into()),
+                    resume_hint: Some("check shell session".into()),
+                    duration_ms: Some(5_000),
+                },
+            )
+            .await
+            .unwrap();
+
+        let task = daemon.store.get_task("task_sleep").unwrap().unwrap();
+        assert_eq!(task.task.status, TaskStatus::Waiting);
+        assert!(task.task.waiting_until.is_some());
+        assert_eq!(task.task.waiting_reason.as_deref(), Some("wait for shell output"));
+        assert_eq!(task.task.waiting_resume_hint.as_deref(), Some("check shell session"));
+    }
+
+    #[tokio::test]
     async fn task_cancel_and_retry_survive_daemon_restart() {
         let root = temp_path("task-runtime-restart");
         let workspace_root = root.join("workspace");
@@ -2641,6 +3237,9 @@ mod tests {
                 priority: crate::domain::TaskPriority::Normal,
                 goal: "persist task runtime state".into(),
                 checkpoint_ref: None,
+                waiting_until: None,
+                waiting_reason: None,
+                waiting_resume_hint: None,
             })
             .unwrap();
 
@@ -3113,6 +3712,9 @@ mod tests {
                 priority: crate::domain::TaskPriority::Normal,
                 goal: "test task".into(),
                 checkpoint_ref: None,
+                waiting_until: None,
+                waiting_reason: None,
+                waiting_resume_hint: None,
             })
             .unwrap();
 

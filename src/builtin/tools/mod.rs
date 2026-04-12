@@ -13,6 +13,7 @@ pub mod knowledge_search;
 pub mod memory_get;
 pub mod memory_search;
 pub mod read;
+pub mod runtime_control;
 pub mod shell;
 pub mod support;
 pub mod write;
@@ -23,6 +24,7 @@ pub use knowledge_search::KnowledgeSearchToolPlugin;
 pub use memory_get::MemoryGetToolPlugin;
 pub use memory_search::MemorySearchToolPlugin;
 pub use read::ReadToolPlugin;
+pub use runtime_control::SleepToolPlugin;
 pub use shell::{
     ShellExecToolPlugin, ShellSessionCloseToolPlugin, ShellSessionExecToolPlugin,
     ShellSessionInterruptToolPlugin, ShellSessionListToolPlugin, ShellSessionOpenToolPlugin,
@@ -89,6 +91,7 @@ impl ToolRegistry {
         registry.register(Arc::new(ShellSessionCloseToolPlugin));
         registry.register(Arc::new(ShellSessionInterruptToolPlugin));
         registry.register(Arc::new(ShellSessionResizeToolPlugin));
+        registry.register(Arc::new(SleepToolPlugin));
         registry
     }
 }
