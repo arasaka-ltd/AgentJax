@@ -200,6 +200,11 @@ async fn handle_connection(stream: UnixStream, daemon: Daemon) -> Result<()> {
         for followup in dispatch.followups {
             write_json_line(&mut write_half, &followup).await?;
         }
+        if let Some(mut live_stream) = dispatch.live_stream {
+            while let Some(envelope) = live_stream.recv().await {
+                write_json_line(&mut write_half, &envelope).await?;
+            }
+        }
     }
 }
 

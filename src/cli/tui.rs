@@ -565,6 +565,18 @@ fn handle_stream(stream: &StreamEnvelope, state: &mut StreamRenderState) -> io::
             }
         }
         StreamPhase::Chunk => match stream.event.as_str() {
+            "assistant.plan" => {
+                finish_active_assistant_line(state);
+                let message = stream
+                    .data
+                    .get("message")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("I am checking the context and preparing the next steps.");
+                let label = format!("{:>LABEL_WIDTH$}", "agent")
+                    .with(Color::Green)
+                    .attribute(Attribute::Bold);
+                println!("{label} {message}");
+            }
             "assistant.text.delta" => {
                 let Some(text) = stream.data.get("text").and_then(|value| value.as_str()) else {
                     return Ok(());

@@ -4,6 +4,7 @@ pub mod billing;
 pub mod context;
 pub mod event;
 pub mod model_output;
+pub mod model_stream;
 pub mod node;
 pub mod object_meta;
 pub mod plugin;
@@ -29,6 +30,7 @@ pub use model_output::{
     AssistantTextItem, FinishReason, ModelOutputItem, ModelTurnOutput, ModelUsage,
     RuntimeControlItem, SleepRequest, ToolCallItem, ToolResultItem,
 };
+pub use model_stream::ModelStreamEvent;
 pub use node::{Node, NodeKind, NodeStatus, TrustLevel};
 pub use object_meta::ObjectMeta;
 pub use plugin::{

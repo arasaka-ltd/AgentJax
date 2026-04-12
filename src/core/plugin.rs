@@ -1,7 +1,8 @@
-use std::sync::Arc;
+use std::{pin::Pin, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use futures_util::{stream, Stream};
 
 use crate::builtin::tools::{ToolDescriptor, ToolRegistry};
 use crate::config::{AgentDefinition, RuntimeConfig};
@@ -10,7 +11,8 @@ use crate::core::{
     WorkspaceRuntimeHost,
 };
 use crate::domain::{
-    BillingRecord, ModelTurnOutput, PluginCapability, PluginManifest, Resource, UsageRecord,
+    BillingRecord, ModelOutputItem, ModelStreamEvent, ModelTurnOutput, PluginCapability,
+    PluginManifest, Resource, UsageRecord,
 };
 
 #[derive(Clone)]
@@ -39,6 +41,8 @@ pub struct ModelClient {
     registry: PluginRegistry,
 }
 
+pub type ModelEventStream = Pin<Box<dyn Stream<Item = Result<ModelStreamEvent>> + Send>>;
+
 #[derive(Debug, Clone, Default)]
 pub struct ProviderPromptRequest {
     pub prompt: String,
@@ -56,6 +60,30 @@ impl ModelClient {
 
     pub fn provider(&self, provider_id: &str) -> Option<ProviderPluginRef> {
         self.registry.provider(provider_id)
+    }
+
+    pub async fn generate(
+        &self,
+        provider_id: &str,
+        agent: &AgentDefinition,
+        request: ProviderPromptRequest,
+    ) -> Result<ModelTurnOutput> {
+        let provider = self
+            .provider(provider_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown provider id: {provider_id}"))?;
+        provider.prompt_turn(agent, request).await
+    }
+
+    pub async fn stream(
+        &self,
+        provider_id: &str,
+        agent: &AgentDefinition,
+        request: ProviderPromptRequest,
+    ) -> Result<ModelEventStream> {
+        let provider = self
+            .provider(provider_id)
+            .ok_or_else(|| anyhow::anyhow!("unknown provider id: {provider_id}"))?;
+        provider.stream_turn(agent, request).await
     }
 }
 
@@ -167,6 +195,15 @@ pub trait ProviderPlugin: Plugin {
         request: ProviderPromptRequest,
     ) -> Result<ModelTurnOutput>;
 
+    async fn stream_turn(
+        &self,
+        agent: &AgentDefinition,
+        request: ProviderPromptRequest,
+    ) -> Result<ModelEventStream> {
+        let output = self.prompt_turn(agent, request).await?;
+        Ok(stream_model_turn(output))
+    }
+
     async fn prompt_text(&self, agent: &AgentDefinition, prompt: &str) -> Result<String> {
         Ok(self
             .prompt_turn(
@@ -179,6 +216,31 @@ pub trait ProviderPlugin: Plugin {
             .await?
             .assistant_text())
     }
+}
+
+pub fn stream_model_turn(output: ModelTurnOutput) -> ModelEventStream {
+    let mut events = Vec::new();
+    for item in output.items.iter().cloned() {
+        match item {
+            ModelOutputItem::AssistantText(item) => {
+                events.push(Ok(ModelStreamEvent::AssistantTextDelta(item)));
+            }
+            ModelOutputItem::ToolCall(item) => {
+                events.push(Ok(ModelStreamEvent::ToolCall(item)));
+            }
+            ModelOutputItem::ToolResult(item) => {
+                events.push(Ok(ModelStreamEvent::ToolResult(item)));
+            }
+            ModelOutputItem::RuntimeControl(item) => {
+                events.push(Ok(ModelStreamEvent::RuntimeControl(item)));
+            }
+        }
+    }
+    if let Some(usage) = output.usage.clone() {
+        events.push(Ok(ModelStreamEvent::Usage(usage)));
+    }
+    events.push(Ok(ModelStreamEvent::Completed(output)));
+    Box::pin(stream::iter(events))
 }
 
 pub trait StoragePlugin: Plugin {
@@ -353,8 +415,9 @@ mod tests {
 
     use anyhow::{anyhow, Result};
     use async_trait::async_trait;
+    use futures_util::StreamExt;
 
-    use super::{Plugin, PluginHost, PluginRef};
+    use super::{stream_model_turn, Plugin, PluginHost, PluginRef};
     use crate::{
         builtin::tools::ToolRegistry,
         config::{RuntimeConfig, RuntimePaths, WorkspaceConfig, WorkspaceDocument, WorkspacePaths},
@@ -362,7 +425,10 @@ mod tests {
             EventBus, HookBus, PluginContext, PluginRegistry, ResourceRegistry,
             WorkspaceRuntimeHost,
         },
-        domain::{HookPoint, Permission, PluginCapability, PluginManifest},
+        domain::{
+            AssistantTextItem, FinishReason, HookPoint, ModelOutputItem, ModelStreamEvent,
+            ModelTurnOutput, ModelUsage, Permission, PluginCapability, PluginManifest,
+        },
     };
 
     #[derive(Clone)]
@@ -410,6 +476,41 @@ mod tests {
                 Ok(())
             }
         }
+    }
+
+    #[tokio::test]
+    async fn stream_model_turn_emits_items_usage_and_completed() {
+        let output = ModelTurnOutput {
+            output_id: "out_1".into(),
+            items: vec![ModelOutputItem::AssistantText(AssistantTextItem {
+                item_id: "item_1".into(),
+                text: "hello".into(),
+                is_partial: false,
+            })],
+            finish_reason: FinishReason::Completed,
+            usage: Some(ModelUsage {
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+            }),
+        };
+
+        let events = stream_model_turn(output)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .expect("stream should succeed");
+
+        assert!(matches!(
+            events.first(),
+            Some(ModelStreamEvent::AssistantTextDelta(item)) if item.text == "hello"
+        ));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ModelStreamEvent::Usage(_))));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ModelStreamEvent::Completed(_))));
     }
 
     #[tokio::test]

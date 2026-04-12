@@ -141,7 +141,7 @@ AgentJax 当前的正式架构规范由以下文档组成。
 - `docs/STRUCTURED_TOOL_CALLING_SPEC.md`
 - 作用：定义结构化 tool calling 与正式 tool loop 协议
 - 包括：
-  - 从文本式 `TOOL_CALL` 协议迁移到结构化 item 协议
+  - 从已废弃的文本式 `TOOL_CALL` 协议迁移到结构化 item 协议
   - `tool calling loop (0..n)` 的运行时状态机
   - tool result 的结构化回写
   - semantic streaming 与 token streaming 的边界

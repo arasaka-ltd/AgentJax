@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use async_stream::try_stream;
 use async_trait::async_trait;
 use reqwest::header::{
     HeaderMap as ReqwestHeaderMap, HeaderValue as ReqwestHeaderValue, AUTHORIZATION,
@@ -13,8 +14,8 @@ use crate::{
         ProviderModelCatalog,
     },
     core::{
-        plugin::ProviderPromptRequest, BillingPlugin, Plugin, PluginContext, ProviderPlugin,
-        ResourceProviderPlugin,
+        plugin::{stream_model_turn, ModelEventStream, ProviderPromptRequest},
+        BillingPlugin, Plugin, PluginContext, ProviderPlugin, ResourceProviderPlugin,
     },
     domain::{
         AssistantTextItem, BillingBreakdownItem, BillingCapability, BillingConfidence, BillingMode,
@@ -269,6 +270,211 @@ impl OpenAiProviderAdapter {
             .assistant_text())
     }
 
+    pub async fn stream_turn(
+        &self,
+        agent: &AgentDefinition,
+        request: ProviderPromptRequest,
+    ) -> Result<ModelEventStream> {
+        let client = reqwest::Client::builder().build()?;
+        let mut body = self.responses_request_body(agent, &request)?;
+        body["stream"] = json!(true);
+
+        let response = client
+            .post(self.config.endpoint_url("responses"))
+            .headers(self.request_headers()?)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body_text = response.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::FORBIDDEN
+                || status == reqwest::StatusCode::UNAUTHORIZED
+            {
+                let output = self.prompt_turn(agent, request).await?;
+                return Ok(stream_model_turn(output));
+            }
+            return Err(anyhow!(
+                "openai stream request failed: status {status} body {body_text}"
+            ));
+        }
+
+        let fallback_adapter = self.clone();
+        let fallback_agent = agent.clone();
+        let fallback_request = request.clone();
+
+        let event_stream: ModelEventStream = Box::pin(try_stream! {
+            // SSE 行缓冲
+            let mut line_buf = String::new();
+            let mut assistant_text = String::new();
+            let mut tool_calls: Vec<ToolCallItem> = Vec::new();
+            // 按 item_id 追踪函数调用的参数积累
+            let mut pending_fn_calls: std::collections::HashMap<String, (String, String)> =
+                std::collections::HashMap::new();
+            let mut usage: Option<ModelUsage> = None;
+            let mut emitted_events = false;
+            let mut text_index = 0_u64;
+
+            let mut response = response;
+            loop {
+                let chunk_opt = response.chunk().await.map_err(|e| anyhow!("stream read error: {e}"))?;
+                let chunk = match chunk_opt {
+                    Some(c) => c,
+                    None => break,
+                };
+                let text = String::from_utf8_lossy(&chunk).into_owned();
+
+                for ch in text.chars() {
+                    if ch == '\n' {
+                        let line = std::mem::take(&mut line_buf);
+                        let line = line.trim_end_matches('\r').to_string();
+
+                        if line.starts_with("data: ") {
+                            let data = &line[6..];
+                            if data == "[DONE]" {
+                                break;
+                            }
+                            if let Ok(obj) = serde_json::from_str::<Value>(data) {
+                                let event_type = obj["type"].as_str().unwrap_or("");
+
+                                match event_type {
+                                    // 文本 delta — 实时 token
+                                    "response.output_text.delta" => {
+                                        if let Some(delta) = obj["delta"].as_str() {
+                                            assistant_text.push_str(delta);
+                                            let item = AssistantTextItem {
+                                                item_id: format!("stream_text_{text_index}"),
+                                                text: delta.to_string(),
+                                                is_partial: true,
+                                            };
+                                            text_index += 1;
+                                            emitted_events = true;
+                                            yield crate::domain::ModelStreamEvent::AssistantTextDelta(item);
+                                        }
+                                    }
+
+                                    // 函数调用开始（output_item.added 里的 function_call）
+                                    "response.output_item.added" => {
+                                        if obj["item"]["type"].as_str() == Some("function_call") {
+                                            let item = &obj["item"];
+                                            let id = item["id"].as_str().unwrap_or("").to_string();
+                                            let name = item["name"].as_str().unwrap_or("").to_string();
+                                            let call_id = item["call_id"].as_str().unwrap_or(&id).to_string();
+                                            pending_fn_calls.insert(id, (name, call_id));
+                                        }
+                                    }
+
+                                    // 函数调用参数 delta
+                                    "response.function_call_arguments.delta" => {
+                                        let item_id = obj["item_id"].as_str().unwrap_or("").to_string();
+                                        if let Some((_name, _call_id)) = pending_fn_calls.get_mut(&item_id) {
+                                            // 参数在 done 事件里汇总，此处忽略 delta
+                                            let _ = obj["delta"].as_str();
+                                        }
+                                    }
+
+                                    // 函数调用完成
+                                    "response.output_item.done" => {
+                                        if obj["item"]["type"].as_str() == Some("function_call") {
+                                            let item = &obj["item"];
+                                            let id = item["id"].as_str().unwrap_or("").to_string();
+                                            let name = item["name"].as_str().unwrap_or("").to_string();
+                                            let call_id = item["call_id"]
+                                                .as_str()
+                                                .unwrap_or(&id)
+                                                .to_string();
+                                            let arguments_raw =
+                                                item["arguments"].as_str().unwrap_or("{}");
+                                            let args = serde_json::from_str(arguments_raw)
+                                                .unwrap_or_else(|_| {
+                                                    json!({ "_raw_arguments": arguments_raw })
+                                                });
+                                            let tc = ToolCallItem {
+                                                item_id: id.clone(),
+                                                tool_call_id: call_id,
+                                                tool_name: name,
+                                                args,
+                                                timeout_secs: None,
+                                            };
+                                            tool_calls.push(tc.clone());
+                                            pending_fn_calls.remove(&id);
+                                            emitted_events = true;
+                                            yield crate::domain::ModelStreamEvent::ToolCall(tc);
+                                        }
+                                    }
+
+                                    // 最终 usage（在 response.completed 内）
+                                    "response.completed" => {
+                                        if let Some(u) = obj["response"]["usage"].as_object() {
+                                            let model_usage = ModelUsage {
+                                                input_tokens: u["input_tokens"]
+                                                    .as_u64()
+                                                    .map(|v| v),
+                                                output_tokens: u["output_tokens"]
+                                                    .as_u64()
+                                                    .map(|v| v),
+                                            };
+                                            usage = Some(model_usage.clone());
+                                            yield crate::domain::ModelStreamEvent::Usage(model_usage);
+                                        }
+                                    }
+
+                                    // 初始错误 — 流开始前就失败，走 fallback
+                                    "error" if !emitted_events => {
+                                        let output = fallback_adapter
+                                            .prompt_turn(&fallback_agent, fallback_request.clone())
+                                            .await
+                                            .map_err(|e| anyhow!("stream error and fallback failed: {e}"))?;
+                                        for evt in model_turn_to_events(output) {
+                                            yield evt?;
+                                        }
+                                        return;
+                                    }
+
+                                    _ => {}
+                                }
+                            }
+                        }
+                    } else {
+                        line_buf.push(ch);
+                    }
+                }
+
+            }
+
+            // 组装最终输出
+            let mut items = Vec::new();
+                if !assistant_text.trim().is_empty() {
+                    let text = collapse_repeated_text(assistant_text);
+                    items.push(ModelOutputItem::AssistantText(AssistantTextItem {
+                        item_id: "assistant.final".into(),
+                        text,
+                        is_partial: false,
+                    }));
+                }
+                items.extend(tool_calls.into_iter().map(ModelOutputItem::ToolCall));
+
+                let finish_reason = if items
+                    .iter()
+                    .any(|item| matches!(item, ModelOutputItem::ToolCall(_)))
+                {
+                    FinishReason::ToolCalls
+                } else {
+                    FinishReason::Completed
+                };
+
+                yield crate::domain::ModelStreamEvent::Completed(ModelTurnOutput {
+                    output_id: "output.openai.stream".into(),
+                    items,
+                    finish_reason,
+                    usage,
+                });
+        });
+
+        Ok(event_stream)
+    }
+
     fn request_headers(&self) -> Result<ReqwestHeaderMap> {
         let mut headers = ReqwestHeaderMap::new();
         let api_key = self.config.resolve_api_key()?;
@@ -335,6 +541,41 @@ impl OpenAiProviderAdapter {
         }
         Ok(body)
     }
+}
+
+#[allow(dead_code)]
+fn should_fallback_to_non_streaming(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("403 forbidden")
+        || lower.contains("401 unauthorized")
+        || lower.contains("415 unsupported media type")
+}
+
+fn model_turn_to_events(output: ModelTurnOutput) -> Vec<Result<crate::domain::ModelStreamEvent>> {
+    let mut events = Vec::new();
+    for item in output.items.iter().cloned() {
+        match item {
+            ModelOutputItem::AssistantText(item) => {
+                events.push(Ok(crate::domain::ModelStreamEvent::AssistantTextDelta(
+                    item,
+                )));
+            }
+            ModelOutputItem::ToolCall(item) => {
+                events.push(Ok(crate::domain::ModelStreamEvent::ToolCall(item)));
+            }
+            ModelOutputItem::ToolResult(item) => {
+                events.push(Ok(crate::domain::ModelStreamEvent::ToolResult(item)));
+            }
+            ModelOutputItem::RuntimeControl(item) => {
+                events.push(Ok(crate::domain::ModelStreamEvent::RuntimeControl(item)));
+            }
+        }
+    }
+    if let Some(usage) = output.usage.clone() {
+        events.push(Ok(crate::domain::ModelStreamEvent::Usage(usage)));
+    }
+    events.push(Ok(crate::domain::ModelStreamEvent::Completed(output)));
+    events
 }
 
 fn normalize_model_turn_output(payload: OpenAiResponsesApiResponse) -> Result<ModelTurnOutput> {
@@ -524,6 +765,16 @@ impl ProviderPlugin for OpenAiProviderPlugin {
             .prompt_turn(agent, request)
             .await
     }
+
+    async fn stream_turn(
+        &self,
+        agent: &AgentDefinition,
+        request: ProviderPromptRequest,
+    ) -> Result<ModelEventStream> {
+        OpenAiProviderAdapter::new(self.config.clone())
+            .stream_turn(agent, request)
+            .await
+    }
 }
 
 #[async_trait]
@@ -648,6 +899,7 @@ fn normalize_model_info(model_id: &str) -> ModelInfoSnapshot {
 mod tests {
     use std::net::SocketAddr;
 
+    use futures_util::StreamExt;
     use serde_json::json;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -664,7 +916,7 @@ mod tests {
         builtin::tools::ToolDescriptor,
         config::AgentDefinition,
         core::plugin::ProviderPromptRequest,
-        domain::{AssistantTextItem, ModelOutputItem},
+        domain::{AssistantTextItem, ModelOutputItem, ModelStreamEvent},
     };
 
     #[tokio::test]
@@ -715,6 +967,147 @@ mod tests {
             .unwrap();
 
         assert_eq!(response, "mocked reply");
+        server.1.abort();
+    }
+
+    #[tokio::test]
+    async fn stream_turn_falls_back_to_non_streaming_when_streaming_is_forbidden() {
+        // 新实现中 stream_turn 和 prompt_turn 都直接使用 base_url + /responses
+        // 所以两次请求都走 /v1/responses
+        let server = spawn_raw_server(vec![
+            (
+                "POST /v1/responses HTTP/1.1",
+                "HTTP/1.1 403 Forbidden\r\ncontent-type: text/plain\r\ncontent-length: 0\r\n\r\n"
+                    .to_string(),
+            ),
+            (
+                "POST /v1/responses HTTP/1.1",
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    r#"{"id":"resp_1","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":{"input_tokens":5,"output_tokens":7},"output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"fallback reply","annotations":[]}]}],"tools":[]}"#.len(),
+                    r#"{"id":"resp_1","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":{"input_tokens":5,"output_tokens":7},"output":[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"fallback reply","annotations":[]}]}],"tools":[]}"#
+                ),
+            ),
+        ])
+        .await;
+        let config = OpenAiProviderConfig {
+            provider_id: "openai-default".into(),
+            api_key: Some("test-key".into()),
+            api_key_env: "OPENAI_API_KEY".into(),
+            base_url: Some(format!("http://{}/v1", server.0)),
+            organization: None,
+            project: None,
+        };
+        let adapter = OpenAiProviderAdapter::new(config);
+
+        let mut stream = adapter
+            .stream_turn(
+                &AgentDefinition::default(),
+                ProviderPromptRequest {
+                    prompt: "hello".into(),
+                    ..ProviderPromptRequest::default()
+                },
+            )
+            .await
+            .unwrap();
+        let mut events = Vec::new();
+        while let Some(event) = stream.next().await {
+            events.push(event.unwrap());
+        }
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ModelStreamEvent::AssistantTextDelta(AssistantTextItem { text, .. }) if text == "fallback reply"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ModelStreamEvent::Usage(usage)
+                if usage.input_tokens == Some(5) && usage.output_tokens == Some(7)
+        )));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, ModelStreamEvent::Completed(_))));
+
+        server.1.abort();
+    }
+
+    #[tokio::test]
+    async fn stream_turn_parses_sse_events_token_by_token() {
+        // 构造一个返回真实 SSE 格式的 mock server
+        let sse_body = concat!(
+            "event: response.created\r\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_test\",\"status\":\"in_progress\"}}\r\n",
+            "\r\n",
+            "event: response.output_item.added\r\n",
+            "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"status\":\"in_progress\"},\"output_index\":0}\r\n",
+            "\r\n",
+            "event: response.output_text.delta\r\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello\",\"content_index\":0,\"output_index\":0,\"item_id\":\"msg_1\"}\r\n",
+            "\r\n",
+            "event: response.output_text.delta\r\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\" World\",\"content_index\":0,\"output_index\":0,\"item_id\":\"msg_1\"}\r\n",
+            "\r\n",
+            "event: response.completed\r\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":3,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":13}}}\r\n",
+            "\r\n"
+        );
+        let server = spawn_raw_server(vec![(
+            "POST /v1/responses HTTP/1.1",
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{}",
+                sse_body.len(), sse_body
+            ),
+        )])
+        .await;
+        let config = OpenAiProviderConfig {
+            provider_id: "openai-default".into(),
+            api_key: Some("test-key".into()),
+            api_key_env: "OPENAI_API_KEY".into(),
+            base_url: Some(format!("http://{}/v1", server.0)),
+            organization: None,
+            project: None,
+        };
+        let adapter = OpenAiProviderAdapter::new(config);
+
+        let mut stream = adapter
+            .stream_turn(
+                &AgentDefinition::default(),
+                ProviderPromptRequest {
+                    prompt: "greet".into(),
+                    ..ProviderPromptRequest::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let mut deltas: Vec<String> = Vec::new();
+        let mut got_usage = false;
+        let mut got_completed = false;
+
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                ModelStreamEvent::AssistantTextDelta(item) => {
+                    assert!(item.is_partial);
+                    deltas.push(item.text);
+                }
+                ModelStreamEvent::Usage(usage) => {
+                    assert_eq!(usage.input_tokens, Some(10));
+                    assert_eq!(usage.output_tokens, Some(3));
+                    got_usage = true;
+                }
+                ModelStreamEvent::Completed(output) => {
+                    let text = output.assistant_text();
+                    assert_eq!(text, "Hello World");
+                    got_completed = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(deltas, vec!["Hello", " World"]);
+        assert!(got_usage, "expected Usage event");
+        assert!(got_completed, "expected Completed event");
+
         server.1.abort();
     }
 
@@ -772,9 +1165,7 @@ mod tests {
                 id: Some("msg_1".into()),
                 content: vec![OpenAiResponsesContentItem {
                     content_type: "output_text".into(),
-                    text: Some(
-                        "compatibility text response".into(),
-                    ),
+                    text: Some("compatibility text response".into()),
                 }],
             }],
         })
@@ -790,28 +1181,29 @@ mod tests {
     #[test]
     fn responses_request_body_includes_native_function_tools() {
         let adapter = OpenAiProviderAdapter::new(OpenAiProviderConfig::default());
-        let body = adapter.responses_request_body(
-            &AgentDefinition::default(),
-            &ProviderPromptRequest {
-                prompt: "hello".into(),
-                tools: vec![ToolDescriptor {
-                    name: "read".into(),
-                    description: "Read a file".into(),
-                    when_to_use: String::new(),
-                    when_not_to_use: String::new(),
-                    arguments_schema: json!({
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string" }
-                        },
-                        "required": ["path"]
-                    }),
-                    default_timeout_secs: 5,
-                    idempotent: true,
-                }],
-            },
-        )
-        .unwrap();
+        let body = adapter
+            .responses_request_body(
+                &AgentDefinition::default(),
+                &ProviderPromptRequest {
+                    prompt: "hello".into(),
+                    tools: vec![ToolDescriptor {
+                        name: "read".into(),
+                        description: "Read a file".into(),
+                        when_to_use: String::new(),
+                        when_not_to_use: String::new(),
+                        arguments_schema: json!({
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string" }
+                            },
+                            "required": ["path"]
+                        }),
+                        default_timeout_secs: 5,
+                        idempotent: true,
+                    }],
+                },
+            )
+            .unwrap();
 
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "read");
@@ -838,6 +1230,24 @@ mod tests {
                     body.len(),
                     body
                 );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (addr, handle)
+    }
+
+    async fn spawn_raw_server(
+        responses: Vec<(&'static str, String)>,
+    ) -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            for (expected_request_line, response) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = vec![0_u8; 8192];
+                let bytes = stream.read(&mut buffer).await.unwrap();
+                let request = String::from_utf8_lossy(&buffer[..bytes]);
+                assert!(request.contains(expected_request_line), "{request}");
                 stream.write_all(response.as_bytes()).await.unwrap();
             }
         });

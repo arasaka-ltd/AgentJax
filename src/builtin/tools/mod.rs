@@ -68,7 +68,12 @@ impl ToolDescriptor {
         if self.description.trim().is_empty() {
             return Err(anyhow!("tool description must not be empty"));
         }
-        if self.arguments_schema.get("type").and_then(|value| value.as_str()) != Some("object") {
+        if self
+            .arguments_schema
+            .get("type")
+            .and_then(|value| value.as_str())
+            != Some("object")
+        {
             return Err(anyhow!(
                 "tool {} schema must be a JSON object schema",
                 self.name

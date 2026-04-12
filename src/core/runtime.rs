@@ -1,7 +1,10 @@
 use anyhow::{anyhow, Result};
 
 use crate::config::{AgentDefinition, RuntimeConfig};
-use crate::core::{plugin::ProviderPromptRequest, PluginHost, WorkspaceRuntimeHost};
+use crate::core::{
+    plugin::{ModelEventStream, ProviderPromptRequest},
+    PluginHost, WorkspaceRuntimeHost,
+};
 use crate::domain::ModelTurnOutput;
 
 #[derive(Clone)]
@@ -62,6 +65,25 @@ impl ApplicationRuntime {
         };
         self.resolve_provider(&agent.provider_id)?
             .prompt_turn(
+                agent,
+                ProviderPromptRequest {
+                    prompt: request.prompt,
+                    tools: request.tools,
+                },
+            )
+            .await
+    }
+
+    pub async fn stream_turn(&self, request: AgentPromptRequest) -> Result<ModelEventStream> {
+        if let Some(agent) = request.agent_override.as_ref() {
+            self.validate_agent_binding(agent)?;
+        }
+        let agent = match request.agent_override.as_ref() {
+            Some(agent) => agent,
+            None => self.resolve_agent(request.agent_id.as_deref())?,
+        };
+        self.resolve_provider(&agent.provider_id)?
+            .stream_turn(
                 agent,
                 ProviderPromptRequest {
                     prompt: request.prompt,

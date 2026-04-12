@@ -4,8 +4,10 @@ use std::{
 };
 
 use chrono::Utc;
+use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::{
     api::{
@@ -86,6 +88,7 @@ struct RegisteredStream {
 pub struct Dispatch {
     pub response: ServerEnvelope,
     pub followups: Vec<ServerEnvelope>,
+    pub live_stream: Option<UnboundedReceiver<ServerEnvelope>>,
 }
 
 impl Dispatch {
@@ -93,6 +96,7 @@ impl Dispatch {
         Self {
             response,
             followups: Vec::new(),
+            live_stream: None,
         }
     }
 }
@@ -132,14 +136,53 @@ impl Daemon {
     }
 
     pub async fn handle_request(&self, request: RequestEnvelope) -> Dispatch {
+        if matches!(request.method, ApiMethod::SessionSend) {
+            return self.handle_session_send_dispatch(request).await;
+        }
         match self.route_request(&request).await {
             Ok((result, followups)) => Dispatch {
                 response: ServerEnvelope::Response(ResponseEnvelope::ok(request.id, result)),
                 followups,
+                live_stream: None,
             },
             Err(error) => Dispatch::single(ServerEnvelope::Response(ResponseEnvelope::err(
                 request.id, error,
             ))),
+        }
+    }
+
+    async fn handle_session_send_dispatch(&self, request: RequestEnvelope) -> Dispatch {
+        let params: SessionSendRequest = match request.parse_params() {
+            Ok(params) => params,
+            Err(error) => {
+                return Dispatch::single(ServerEnvelope::Response(ResponseEnvelope::err(
+                    request.id, error,
+                )))
+            }
+        };
+
+        if params.stream {
+            match self.handle_session_send_streaming(params).await {
+                Ok((result, receiver)) => Dispatch {
+                    response: ServerEnvelope::Response(ResponseEnvelope::ok(request.id, result)),
+                    followups: Vec::new(),
+                    live_stream: Some(receiver),
+                },
+                Err(error) => Dispatch::single(ServerEnvelope::Response(ResponseEnvelope::err(
+                    request.id, error,
+                ))),
+            }
+        } else {
+            match self.handle_session_send(params).await {
+                Ok((result, followups)) => Dispatch {
+                    response: ServerEnvelope::Response(ResponseEnvelope::ok(request.id, result)),
+                    followups,
+                    live_stream: None,
+                },
+                Err(error) => Dispatch::single(ServerEnvelope::Response(ResponseEnvelope::err(
+                    request.id, error,
+                ))),
+            }
         }
     }
 
@@ -236,12 +279,62 @@ impl Daemon {
         params: SessionSendRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
         let session_id = params.session_id.clone();
+        let turn_id = self.store.next_turn_id();
+        let stream_id = params.stream.then(|| self.store.next_stream_id());
         self.store
             .mark_turn_active(&session_id)
             .map_err(map_store_error)?;
-        let result = self.handle_session_send_inner(params).await;
+        let result = self
+            .handle_session_send_inner(params, turn_id, stream_id, None)
+            .await;
         self.store.clear_turn_active(&session_id);
         result
+    }
+
+    async fn handle_session_send_streaming(
+        &self,
+        params: SessionSendRequest,
+    ) -> Result<(Value, UnboundedReceiver<ServerEnvelope>), ApiError> {
+        let session_id = params.session_id.clone();
+        let turn_id = self.store.next_turn_id();
+        let stream_id = Some(self.store.next_stream_id());
+        self.store
+            .mark_turn_active(&session_id)
+            .map_err(map_store_error)?;
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let daemon = self.clone();
+        let response = SessionSendResponse {
+            accepted: true,
+            turn_id: turn_id.clone(),
+            stream_id: stream_id.clone().map(Into::into),
+        };
+
+        tokio::spawn(async move {
+            let result = daemon
+                .handle_session_send_inner(
+                    params,
+                    turn_id.clone(),
+                    stream_id.clone(),
+                    Some(tx.clone()),
+                )
+                .await;
+            daemon.store.clear_turn_active(&session_id);
+            if let Err(error) = result {
+                let _ = tx.send(stream_error_envelope(
+                    stream_id.as_deref().unwrap_or("stream.error"),
+                    &turn_id,
+                    &error.message,
+                ));
+                let _ = tx.send(stream_terminal_envelope(
+                    stream_id.as_deref().unwrap_or("stream.error"),
+                    &turn_id,
+                    "failed",
+                ));
+            }
+        });
+
+        Ok((self.serialize(response)?, rx))
     }
 
     fn handle_session_model_inspect(
@@ -1153,8 +1246,10 @@ impl Daemon {
     async fn handle_session_send_inner(
         &self,
         params: SessionSendRequest,
+        turn_id: String,
+        stream_id: Option<String>,
+        live_stream: Option<UnboundedSender<ServerEnvelope>>,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        let turn_id = self.store.next_turn_id();
         let session = self
             .store
             .get_session(&params.session_id)
@@ -1301,13 +1396,12 @@ impl Daemon {
                 .messages,
             8,
         );
-        let stream_id = params.stream.then(|| self.store.next_stream_id());
         if let Some(stream_id) = stream_id.as_deref() {
             self.register_stream(stream_id, "session.send", StreamStatus::Active);
         }
         let mut semantic_stream = stream_id
             .clone()
-            .map(|stream_id| SemanticStreamBuilder::new(stream_id, &turn_id));
+            .map(|stream_id| SemanticStreamBuilder::new(stream_id, &turn_id, live_stream.clone()));
 
         let loop_outcome = self
             .run_tool_loop(
@@ -2361,21 +2455,27 @@ struct SemanticStreamBuilder {
     stream_id: String,
     seq: u64,
     envelopes: Vec<ServerEnvelope>,
+    live_stream: Option<UnboundedSender<ServerEnvelope>>,
 }
 
 impl SemanticStreamBuilder {
-    fn new(stream_id: String, turn_id: &str) -> Self {
+    fn new(
+        stream_id: String,
+        turn_id: &str,
+        live_stream: Option<UnboundedSender<ServerEnvelope>>,
+    ) -> Self {
         let mut builder = Self {
             stream_id: stream_id.clone(),
             seq: 0,
             envelopes: Vec::new(),
+            live_stream,
         };
         builder.push("turn.started", json!({ "turn_id": turn_id }));
         builder
     }
 
     fn push(&mut self, event: &str, data: Value) {
-        self.envelopes.push(ServerEnvelope::Stream(StreamEnvelope {
+        let envelope = ServerEnvelope::Stream(StreamEnvelope {
             stream_id: self.stream_id.clone().into(),
             phase: if self.seq == 0 {
                 StreamPhase::Start
@@ -2386,7 +2486,11 @@ impl SemanticStreamBuilder {
             seq: self.seq,
             data,
             meta: None,
-        }));
+        });
+        if let Some(live_stream) = self.live_stream.as_ref() {
+            let _ = live_stream.send(envelope.clone());
+        }
+        self.envelopes.push(envelope);
         self.seq += 1;
     }
 
@@ -2410,16 +2514,49 @@ impl SemanticStreamBuilder {
                 "status": status,
             }),
         );
-        self.envelopes.push(ServerEnvelope::Stream(StreamEnvelope {
+        let envelope = ServerEnvelope::Stream(StreamEnvelope {
             stream_id: self.stream_id.into(),
             phase: StreamPhase::End,
             event: "stream.completed".into(),
             seq: self.seq,
             data: json!({ "turn_id": turn_id, "done": true, "status": status }),
             meta: None,
-        }));
+        });
+        if let Some(live_stream) = self.live_stream.as_ref() {
+            let _ = live_stream.send(envelope.clone());
+        }
+        self.envelopes.push(envelope);
         self.envelopes
     }
+}
+
+fn stream_error_envelope(stream_id: &str, turn_id: &str, message: &str) -> ServerEnvelope {
+    ServerEnvelope::Stream(StreamEnvelope {
+        stream_id: stream_id.into(),
+        phase: StreamPhase::Error,
+        event: "stream.error".into(),
+        seq: 0,
+        data: json!({
+            "turn_id": turn_id,
+            "message": message,
+        }),
+        meta: None,
+    })
+}
+
+fn stream_terminal_envelope(stream_id: &str, turn_id: &str, status: &str) -> ServerEnvelope {
+    ServerEnvelope::Stream(StreamEnvelope {
+        stream_id: stream_id.into(),
+        phase: StreamPhase::End,
+        event: "stream.completed".into(),
+        seq: 1,
+        data: json!({
+            "turn_id": turn_id,
+            "done": true,
+            "status": status,
+        }),
+        meta: None,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -2460,23 +2597,75 @@ impl Daemon {
                     "iteration": iteration,
                 }),
             )?;
-            let response = self
-                .app
-                .runtime
-                .prompt_turn(AgentPromptRequest {
-                    prompt,
-                    agent_id: Some(self.app.runtime.default_agent().agent_id.clone()),
-                    agent_override: Some(session_agent.clone()),
-                    tools: self.app.tool_registry.descriptors(),
-                })
-                .await
-                .map_err(|error| {
+            let response = if stream.is_some() {
+                let mut model_stream = self
+                    .app
+                    .runtime
+                    .stream_turn(AgentPromptRequest {
+                        prompt,
+                        agent_id: Some(self.app.runtime.default_agent().agent_id.clone()),
+                        agent_override: Some(session_agent.clone()),
+                        tools: self.app.tool_registry.descriptors(),
+                    })
+                    .await
+                    .map_err(|error| {
+                        ApiError::new(
+                            ApiErrorCode::InternalError,
+                            format!("model stream failed in tool loop: {error}"),
+                            false,
+                        )
+                    })?;
+                let mut final_output = None;
+                while let Some(event) = model_stream.next().await {
+                    let event = event.map_err(|error| {
+                        ApiError::new(
+                            ApiErrorCode::InternalError,
+                            format!("model stream event failed in tool loop: {error}"),
+                            false,
+                        )
+                    })?;
+                    match event {
+                        crate::domain::ModelStreamEvent::AssistantTextDelta(item) => {
+                            if let Some(stream) = stream.as_deref_mut() {
+                                if !item.text.is_empty() {
+                                    stream.push_text(turn_id, &item.text);
+                                }
+                            }
+                        }
+                        crate::domain::ModelStreamEvent::Completed(output) => {
+                            final_output = Some(output);
+                        }
+                        crate::domain::ModelStreamEvent::ToolCall(_)
+                        | crate::domain::ModelStreamEvent::ToolResult(_)
+                        | crate::domain::ModelStreamEvent::RuntimeControl(_)
+                        | crate::domain::ModelStreamEvent::Usage(_) => {}
+                    }
+                }
+                final_output.ok_or_else(|| {
                     ApiError::new(
                         ApiErrorCode::InternalError,
-                        format!("model call failed in tool loop: {error}"),
+                        "model stream finished without final output",
                         false,
                     )
-                })?;
+                })?
+            } else {
+                self.app
+                    .runtime
+                    .prompt_turn(AgentPromptRequest {
+                        prompt,
+                        agent_id: Some(self.app.runtime.default_agent().agent_id.clone()),
+                        agent_override: Some(session_agent.clone()),
+                        tools: self.app.tool_registry.descriptors(),
+                    })
+                    .await
+                    .map_err(|error| {
+                        ApiError::new(
+                            ApiErrorCode::InternalError,
+                            format!("model call failed in tool loop: {error}"),
+                            false,
+                        )
+                    })?
+            };
             self.record_event(
                 session_id,
                 turn_id,
@@ -2490,13 +2679,7 @@ impl Daemon {
                     "iteration": iteration,
                 }),
             )?;
-
             let assistant_text = response.assistant_text();
-            if let Some(stream) = stream.as_deref_mut() {
-                if !assistant_text.trim().is_empty() {
-                    stream.push_text(turn_id, &assistant_text);
-                }
-            }
             let tool_calls = collect_tool_calls(
                 &response,
                 session_id,
@@ -2540,7 +2723,8 @@ impl Daemon {
                 }
                 let tool_result =
                     execute_tool_call_item(&self.execute_tool_call(&tool_call).await?, &tool_call);
-                let mut tool_result_message = SessionMessage::tool_result(tool_result.content.clone());
+                let mut tool_result_message =
+                    SessionMessage::tool_result(tool_result.content.clone());
                 tool_result_message.annotations = vec![
                     SessionMessageAnnotation {
                         kind: "tool_name".into(),
@@ -3093,25 +3277,146 @@ mod tests {
         fs::create_dir_all(&sample_dir).unwrap();
         fs::write(sample_dir.join("a.txt"), "hello").unwrap();
 
-        let server = spawn_server(vec![
+        let tool_args = format!(
+            "{{\"path\":\"{}\",\"start_line\":1,\"end_line\":1}}",
+            sample_dir.join("a.txt").display()
+        );
+        let server = spawn_sse_server(vec![
             (
                 "POST /v1/responses HTTP/1.1".to_string(),
                 vec![
-                    "\"type\":\"function\"".to_string(),
-                    "\"tool_choice\":\"auto\"".to_string(),
+                    "\"stream\":true".to_string(),
+                    "\"name\":\"read\"".to_string(),
                 ],
-                format!(
-                    r#"{{"id":"resp_1","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{{"id":"msg_1","type":"function_call","call_id":"msg_1_call_0_read","name":"read","arguments":"{{\"path\":\"{}\",\"start_line\":1,\"end_line\":1}}"}}],"tools":[]}}"#,
-                    sample_dir.join("a.txt").display()
-                ),
+                vec![
+                    serde_json::json!({
+                        "type": "response.output_item.added",
+                        "item_id": "msg_1_call_0_read",
+                        "output_index": 0,
+                        "sequence_number": 1,
+                        "item": {
+                            "type": "function_call",
+                            "id": "msg_1_call_0_read",
+                            "arguments": tool_args.clone(),
+                            "call_id": "msg_1_call_0_read",
+                            "name": "read",
+                            "status": "in_progress"
+                        }
+                    })
+                    .to_string(),
+                    serde_json::json!({
+                        "type": "response.function_call_arguments.delta",
+                        "item_id": "msg_1_call_0_read",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "sequence_number": 2,
+                        "delta": tool_args.clone()
+                    })
+                    .to_string(),
+                    serde_json::json!({
+                        "type": "response.output_item.done",
+                        "item_id": "msg_1_call_0_read",
+                        "output_index": 0,
+                        "sequence_number": 3,
+                        "item": {
+                            "type": "function_call",
+                            "id": "msg_1_call_0_read",
+                            "arguments": tool_args.clone(),
+                            "call_id": "msg_1_call_0_read",
+                            "name": "read",
+                            "status": "completed"
+                        }
+                    })
+                    .to_string(),
+                    serde_json::json!({
+                        "type": "response.completed",
+                        "sequence_number": 4,
+                        "response": {
+                            "id": "resp_1",
+                            "object": "response",
+                            "created_at": 0,
+                            "status": "completed",
+                            "error": null,
+                            "incomplete_details": null,
+                            "instructions": null,
+                            "max_output_tokens": null,
+                            "model": "gpt-4o-mini",
+                            "usage": {
+                                "input_tokens": 10,
+                                "input_tokens_details": { "cached_tokens": 0 },
+                                "output_tokens": 5,
+                                "output_tokens_details": { "reasoning_tokens": 0 },
+                                "total_tokens": 15
+                            },
+                            "output": [],
+                            "tools": []
+                        }
+                    })
+                    .to_string(),
+                ],
             ),
             (
                 "POST /v1/responses HTTP/1.1".to_string(),
                 vec![
+                    "\"stream\":true".to_string(),
                     "<message kind=\\\"tool_result\\\">".to_string(),
-                    "tool_name".to_string(),
                 ],
-                r#"{"id":"resp_2","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{"id":"msg_2","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"final answer after tool","annotations":[]}]}],"tools":[]}"#.to_string(),
+                vec![
+                    serde_json::json!({
+                        "type": "response.output_text.delta",
+                        "item_id": "msg_2",
+                        "output_index": 0,
+                        "content_index": 0,
+                        "sequence_number": 1,
+                        "delta": "final answer after tool"
+                    })
+                    .to_string(),
+                    serde_json::json!({
+                        "type": "response.output_item.done",
+                        "item_id": "msg_2",
+                        "output_index": 0,
+                        "sequence_number": 2,
+                        "item": {
+                            "type": "message",
+                            "id": "msg_2",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "final answer after tool",
+                                    "annotations": []
+                                }
+                            ]
+                        }
+                    })
+                    .to_string(),
+                    serde_json::json!({
+                        "type": "response.completed",
+                        "sequence_number": 3,
+                        "response": {
+                            "id": "resp_2",
+                            "object": "response",
+                            "created_at": 0,
+                            "status": "completed",
+                            "error": null,
+                            "incomplete_details": null,
+                            "instructions": null,
+                            "max_output_tokens": null,
+                            "model": "gpt-4o-mini",
+                            "usage": {
+                                "input_tokens": 12,
+                                "input_tokens_details": { "cached_tokens": 0 },
+                                "output_tokens": 6,
+                                "output_tokens_details": { "reasoning_tokens": 0 },
+                                "total_tokens": 18
+                            },
+                            "output": [],
+                            "tools": []
+                        }
+                    })
+                    .to_string(),
+                ],
             ),
         ])
         .await;
@@ -3130,7 +3435,7 @@ mod tests {
                     provider_id: "openai-default".into(),
                     api_key: Some("test-key".into()),
                     api_key_env: "OPENAI_API_KEY".into(),
-                    base_url: Some(format!("http://{}", server.0)),
+                    base_url: Some(format!("http://{}/v1", server.0)),
                     organization: None,
                     project: None,
                 },
@@ -3166,20 +3471,27 @@ mod tests {
             })
             .await;
 
-        let events = send
+        let mut events = send
             .followups
             .iter()
             .filter_map(|envelope| match envelope {
-                crate::api::ServerEnvelope::Stream(stream) => Some(stream.event.as_str()),
+                crate::api::ServerEnvelope::Stream(stream) => Some(stream.event.clone()),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert!(events.contains(&"turn.started"));
-        assert!(events.contains(&"tool_call.started"));
-        assert!(events.contains(&"tool_call.completed"));
-        assert!(events.contains(&"assistant.text.delta"));
-        assert!(events.contains(&"assistant.completed"));
-        assert!(events.contains(&"turn.completed"));
+        if let Some(mut live_stream) = send.live_stream {
+            while let Some(envelope) = live_stream.recv().await {
+                if let crate::api::ServerEnvelope::Stream(stream) = envelope {
+                    events.push(stream.event);
+                }
+            }
+        }
+        assert!(events.iter().any(|event| event == "turn.started"));
+        assert!(events.iter().any(|event| event == "tool_call.started"));
+        assert!(events.iter().any(|event| event == "tool_call.completed"));
+        assert!(events.iter().any(|event| event == "assistant.text.delta"));
+        assert!(events.iter().any(|event| event == "assistant.completed"));
+        assert!(events.iter().any(|event| event == "turn.completed"));
 
         server.1.abort();
         let _ = fs::remove_dir_all(root);
@@ -4384,6 +4696,36 @@ mod tests {
                 }
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (addr, handle)
+    }
+
+    async fn spawn_sse_server(
+        responses: Vec<(String, Vec<String>, Vec<String>)>,
+    ) -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            for (expected_request_line, expected_substrings, events) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = vec![0_u8; 65536];
+                let bytes = stream.read(&mut buffer).await.unwrap();
+                let request = String::from_utf8_lossy(&buffer[..bytes]);
+                assert!(request.contains(&expected_request_line), "{request}");
+                for expected in expected_substrings {
+                    assert!(request.contains(&expected), "{request}");
+                }
+                let body = events
+                    .into_iter()
+                    .map(|event| format!("data: {event}\n\n"))
+                    .collect::<String>();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
                     body.len(),
                     body
                 );

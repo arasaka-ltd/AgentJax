@@ -15,8 +15,9 @@ pub use event_bus::EventBus;
 pub use hook_bus::HookBus;
 pub use persistence::{EventStore, PersistenceStore, SessionRecord, SessionStore};
 pub use plugin::{
-    BackendPlugin, BillingPlugin, ContextPlugin, Plugin, PluginContext, PluginHost, PluginRef,
-    ProviderPlugin, ProviderPluginRef, ResourceProviderPlugin, StoragePlugin,
+    BackendPlugin, BillingPlugin, ContextPlugin, ModelClient, ModelEventStream, Plugin,
+    PluginContext, PluginHost, PluginRef, ProviderPlugin, ProviderPluginRef,
+    ResourceProviderPlugin, StoragePlugin,
 };
 pub use plugin_manager::{
     PluginActionReport, PluginManager, PluginManagerCandidate, PluginRuntimeSnapshot,
