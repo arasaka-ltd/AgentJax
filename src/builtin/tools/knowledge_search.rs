@@ -40,10 +40,10 @@ impl Plugin for KnowledgeSearchToolPlugin {
 impl ToolPlugin for KnowledgeSearchToolPlugin {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            name: "knowledge.search".into(),
+            name: "knowledge_search".into(),
             description: "Search domain knowledge libraries for evidence candidates.".into(),
             when_to_use: "Use for evidence-oriented questions over project or domain knowledge.".into(),
-            when_not_to_use: "Do not use when you already know the exact document and can call knowledge.get directly.".into(),
+            when_not_to_use: "Do not use when you already know the exact document and can call knowledge_get directly.".into(),
             arguments_schema: json!({
                 "type": "object",
                 "properties": {

@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,6 +41,50 @@ pub struct ToolDescriptor {
     pub arguments_schema: Value,
     pub default_timeout_secs: u64,
     pub idempotent: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+}
+
+impl ToolDescriptor {
+    pub fn validate_definition(&self) -> Result<()> {
+        if self.name.is_empty() {
+            return Err(anyhow!("tool name must not be empty"));
+        }
+        if !self
+            .name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        {
+            return Err(anyhow!(
+                "tool name contains unsupported characters: {}",
+                self.name
+            ));
+        }
+        if self.description.trim().is_empty() {
+            return Err(anyhow!("tool description must not be empty"));
+        }
+        if self.arguments_schema.get("type").and_then(|value| value.as_str()) != Some("object") {
+            return Err(anyhow!(
+                "tool {} schema must be a JSON object schema",
+                self.name
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn definition(&self) -> Result<ToolDefinition> {
+        self.validate_definition()?;
+        Ok(ToolDefinition {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            parameters: self.arguments_schema.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

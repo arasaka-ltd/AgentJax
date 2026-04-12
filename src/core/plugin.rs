@@ -43,7 +43,6 @@ pub struct ModelClient {
 pub struct ProviderPromptRequest {
     pub prompt: String,
     pub tools: Vec<ToolDescriptor>,
-    pub input_items: Vec<serde_json::Value>,
 }
 
 impl ModelClient {

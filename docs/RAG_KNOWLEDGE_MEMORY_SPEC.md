@@ -207,10 +207,10 @@
 - `Memory` / `Knowledge` 是 Agent 的认知层
 
 Agent 直接看到的 retrieval tools 应优先表现为：
-- `memory.search`
-- `memory.get`
-- `knowledge.search`
-- `knowledge.get`
+- `memory_search`
+- `memory_get`
+- `knowledge_search`
+- `knowledge_get`
 
 不建议第一阶段直接暴露：
 - `rag.search`
@@ -308,8 +308,8 @@ retrieval tool surface 至少应分成两步：
 - `Memory` 的价值不在“搜得到”，而在“该不该写进去”
 
 在 Agent-facing tool surface 上，这层能力应优先体现为：
-- `memory.search`
-- `memory.get`
+- `memory_search`
+- `memory_get`
 
 而不是让 Agent 直接操心底层 memory collections 的内部结构。
 
@@ -339,16 +339,16 @@ retrieval tool surface 至少应分成两步：
 
 ### 10.1 第一阶段最小工具闭环
 先定义四个 Agent-facing retrieval tools：
-- `memory.search`
-- `memory.get`
-- `knowledge.search`
-- `knowledge.get`
+- `memory_search`
+- `memory_get`
+- `knowledge_search`
+- `knowledge_get`
 
 其中：
 - `search` 负责候选召回
 - `get` 负责正文或精确片段读取
 
-### 10.2 `memory.search` 的最小能力
+### 10.2 `memory_search` 的最小能力
 至少应支持：
 - query
 - top_k
@@ -356,14 +356,14 @@ retrieval tool surface 至少应分成两步：
 - retrieval mode
 - excerpt 返回
 
-### 10.3 `memory.get` 的最小能力
+### 10.3 `memory_get` 的最小能力
 至少应支持：
 - 按 `memory_ref` 读取
 - 按路径读取
 - 按 `start_line` / `end_line` 精确读取 Markdown 行段
 - token / line budget 保护
 
-### 10.4 `knowledge.search` 的最小能力
+### 10.4 `knowledge_search` 的最小能力
 至少应支持：
 - query
 - top_k
@@ -372,7 +372,7 @@ retrieval tool surface 至少应分成两步：
 - retrieval mode
 - metadata filters
 
-### 10.5 `knowledge.get` 的最小能力
+### 10.5 `knowledge_get` 的最小能力
 至少应支持：
 - 按 `doc_ref` 读取
 - 按路径读取

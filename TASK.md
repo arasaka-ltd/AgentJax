@@ -33,7 +33,7 @@
   - `read` / `edit` / `write` 尚未按 `docs/FILE_TOOLS_SPEC.md` 落地
 - [ ] retrieval tools 新协议：
   - 当前仍是 context assembly 自动检索
-  - `memory.search/get` / `knowledge.search/get` 尚未按 `docs/RETRIEVAL_TOOL_SPEC.md` 落地
+  - `memory_search/get` / `knowledge_search/get` 尚未按 `docs/RETRIEVAL_TOOL_SPEC.md` 落地
 - [ ] plugin manager 深化：
   - 已有 discovery / enabled / disabled / basic reload
   - 但 `config refs` / health / drain / swap / lifecycle 深度治理不足
@@ -387,26 +387,26 @@
   - 不在 AgentJax 内部重复发明一套与 Rig 平行的 provider / embedding / vector index 基础接口
 
 - [x] 定义并落地正式 retrieval tool surface：
-  - `memory.search`
-  - `memory.get`
-  - `knowledge.search`
-  - `knowledge.get`
-- [x] `memory.search` 支持：
+  - `memory_search`
+  - `memory_get`
+  - `knowledge_search`
+  - `knowledge_get`
+- [x] `memory_search` 支持：
   - query
   - top_k
   - scope
   - mode
-- [x] `memory.get` 支持：
+- [x] `memory_get` 支持：
   - `memory_ref`
   - path fallback
   - line-range 读取
-- [x] `knowledge.search` 支持：
+- [x] `knowledge_search` 支持：
   - query
   - `library` / `libraries`
   - path prefix
   - mode
   - metadata filters
-- [x] `knowledge.get` 支持：
+- [x] `knowledge_get` 支持：
   - `doc_ref`
   - path fallback
   - `library`

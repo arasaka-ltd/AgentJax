@@ -2147,7 +2147,7 @@ impl Daemon {
 
 fn shell_tool_started_event(tool_call: &ToolCall) -> Option<(EventType, Value)> {
     match tool_call.tool_name.as_str() {
-        "shell.exec" => Some((
+        "shell_exec" => Some((
             EventType::ShellExecutionStarted,
             json!({
                 "tool_name": tool_call.tool_name,
@@ -2157,7 +2157,7 @@ fn shell_tool_started_event(tool_call: &ToolCall) -> Option<(EventType, Value)> 
                 "timeout_secs": tool_call.args.get("timeout_secs"),
             }),
         )),
-        "shell.session.exec" => Some((
+        "shell_session_exec" => Some((
             EventType::ShellExecutionStarted,
             json!({
                 "tool_name": tool_call.tool_name,
@@ -2175,7 +2175,7 @@ fn shell_tool_started_event(tool_call: &ToolCall) -> Option<(EventType, Value)> 
 fn shell_tool_result_events(tool_call: &ToolCall, metadata: &Value) -> Vec<(EventType, Value)> {
     let mut events = Vec::new();
     match tool_call.tool_name.as_str() {
-        "shell.exec" => {
+        "shell_exec" => {
             let exit_code = metadata.get("exit_code").and_then(|value| value.as_i64());
             let timed_out = metadata
                 .get("timed_out")
@@ -2198,8 +2198,8 @@ fn shell_tool_result_events(tool_call: &ToolCall, metadata: &Value) -> Vec<(Even
                 }),
             ));
         }
-        "shell.session.open" => events.push((EventType::ShellSessionOpened, metadata.clone())),
-        "shell.session.read" => {
+        "shell_session_open" => events.push((EventType::ShellSessionOpened, metadata.clone())),
+        "shell_session_read" => {
             if let Some(chunks) = metadata.get("chunks").and_then(|value| value.as_array()) {
                 if !chunks.is_empty() {
                     events.push((
@@ -2225,8 +2225,8 @@ fn shell_tool_result_events(tool_call: &ToolCall, metadata: &Value) -> Vec<(Even
                 events.push((event_type, completed_exec.clone()));
             }
         }
-        "shell.session.close" => events.push((EventType::ShellSessionClosed, metadata.clone())),
-        "shell.session.interrupt" => {
+        "shell_session_close" => events.push((EventType::ShellSessionClosed, metadata.clone())),
+        "shell_session_interrupt" => {
             if metadata
                 .get("signaled")
                 .and_then(|value| value.as_bool())
@@ -2235,7 +2235,7 @@ fn shell_tool_result_events(tool_call: &ToolCall, metadata: &Value) -> Vec<(Even
                 events.push((EventType::ShellExecutionInterrupted, metadata.clone()));
             }
         }
-        "shell.session.resize" => {
+        "shell_session_resize" => {
             if metadata
                 .get("resized")
                 .and_then(|value| value.as_bool())
@@ -2251,7 +2251,7 @@ fn shell_tool_result_events(tool_call: &ToolCall, metadata: &Value) -> Vec<(Even
 
 fn shell_tool_failure_event(tool_call: &ToolCall, error: &str) -> Option<(EventType, Value)> {
     match tool_call.tool_name.as_str() {
-        "shell.exec" | "shell.session.exec" => Some((
+        "shell_exec" | "shell_session_exec" => Some((
             EventType::ShellExecutionFailed,
             json!({
                 "tool_name": tool_call.tool_name,
@@ -2443,14 +2443,11 @@ impl Daemon {
         conversation_messages: Vec<SessionMessage>,
         mut stream: Option<&mut SemanticStreamBuilder>,
     ) -> Result<ToolLoopOutcome, ApiError> {
-        let prompt =
-            build_tool_followup_prompt(&self.app, assembled_context, conversation_messages);
-        let mut provider_input_items = vec![json!({
-            "role": "user",
-            "content": prompt,
-        })];
+        let mut loop_messages = conversation_messages;
 
         for iteration in 0..=MAX_TOOL_LOOP_STEPS {
+            let prompt =
+                build_tool_followup_prompt(&self.app, assembled_context, loop_messages.clone());
             self.record_event(
                 session_id,
                 turn_id,
@@ -2467,11 +2464,10 @@ impl Daemon {
                 .app
                 .runtime
                 .prompt_turn(AgentPromptRequest {
-                    prompt: String::new(),
+                    prompt,
                     agent_id: Some(self.app.runtime.default_agent().agent_id.clone()),
                     agent_override: Some(session_agent.clone()),
                     tools: self.app.tool_registry.descriptors(),
-                    input_items: provider_input_items.clone(),
                 })
                 .await
                 .map_err(|error| {
@@ -2501,7 +2497,6 @@ impl Daemon {
                     stream.push_text(turn_id, &assistant_text);
                 }
             }
-            provider_input_items.extend(response.continuation_input_items.clone());
             let tool_calls = collect_tool_calls(
                 &response,
                 session_id,
@@ -2512,6 +2507,10 @@ impl Daemon {
 
             if tool_calls.is_empty() {
                 return Ok(ToolLoopOutcome::Final(assistant_text));
+            }
+
+            if !assistant_text.trim().is_empty() {
+                loop_messages.push(SessionMessage::assistant(assistant_text.clone()));
             }
 
             for tool_call in tool_calls {
@@ -2541,11 +2540,22 @@ impl Daemon {
                 }
                 let tool_result =
                     execute_tool_call_item(&self.execute_tool_call(&tool_call).await?, &tool_call);
-                provider_input_items.push(json!({
-                    "type": "function_call_output",
-                    "call_id": tool_call.tool_call_id,
-                    "output": tool_result.content,
-                }));
+                let mut tool_result_message = SessionMessage::tool_result(tool_result.content.clone());
+                tool_result_message.annotations = vec![
+                    SessionMessageAnnotation {
+                        kind: "tool_name".into(),
+                        value: tool_call.tool_name.clone(),
+                    },
+                    SessionMessageAnnotation {
+                        kind: "tool_call_id".into(),
+                        value: tool_call.tool_call_id.clone(),
+                    },
+                    SessionMessageAnnotation {
+                        kind: "tool_error".into(),
+                        value: tool_result.is_error.to_string(),
+                    },
+                ];
+                loop_messages.push(tool_result_message);
                 if let Some(stream) = stream.as_deref_mut() {
                     stream.push(
                         "tool_call.completed",
@@ -2977,15 +2987,15 @@ mod tests {
                     "\"tool_choice\":\"auto\"".to_string(),
                 ],
                 format!(
-                    r#"{{"id":"resp_1","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{{"type":"output_text","text":"TOOL_CALL {{\"tool\":\"read\",\"args\":{{\"path\":\"{}\",\"start_line\":1,\"end_line\":1}}}}","annotations":[]}}]}}],"tools":[]}}"#,
+                    r#"{{"id":"resp_1","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{{"id":"fc_1","type":"function_call","call_id":"fc_1_read","name":"read","arguments":"{{\"path\":\"{}\",\"start_line\":1,\"end_line\":1}}"}}],"tools":[]}}"#,
                     sample_dir.join("a.txt").display()
                 ),
             ),
             (
                 "POST /v1/responses HTTP/1.1".to_string(),
                 vec![
-                    "\"type\":\"function_call_output\"".to_string(),
-                    "\"call_id\":\"msg_1_call_0_read\"".to_string(),
+                    "<message kind=\\\"tool_result\\\">".to_string(),
+                    "tool_name".to_string(),
                     sample_dir.join("a.txt").display().to_string(),
                 ],
                 r#"{"id":"resp_2","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{"id":"msg_2","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"final answer after tool","annotations":[]}]}],"tools":[]}"#.to_string(),
@@ -3098,8 +3108,8 @@ mod tests {
             (
                 "POST /v1/responses HTTP/1.1".to_string(),
                 vec![
-                    "\"type\":\"function_call_output\"".to_string(),
-                    "\"call_id\":\"msg_1_call_0_read\"".to_string(),
+                    "<message kind=\\\"tool_result\\\">".to_string(),
+                    "tool_name".to_string(),
                 ],
                 r#"{"id":"resp_2","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"instructions":null,"max_output_tokens":null,"model":"gpt-4o-mini","usage":null,"output":[{"id":"msg_2","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"final answer after tool","annotations":[]}]}],"tools":[]}"#.to_string(),
             ),
@@ -3212,14 +3222,13 @@ mod tests {
                 crate::domain::ModelOutputItem::ToolCall(crate::domain::ToolCallItem {
                     item_id: "item_2".into(),
                     tool_call_id: "call_2".into(),
-                    tool_name: "memory.search".into(),
+                    tool_name: "memory_search".into(),
                     args: serde_json::json!({ "query": "defaults" }),
                     timeout_secs: None,
                 }),
             ],
             finish_reason: crate::domain::FinishReason::ToolCalls,
             usage: None,
-            continuation_input_items: Vec::new(),
         };
 
         let tool_calls = collect_tool_calls(

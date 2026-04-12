@@ -637,7 +637,7 @@ mod tests {
                     idempotent: false,
                 },
                 ToolDescriptor {
-                    name: "memory.search".into(),
+                    name: "memory_search".into(),
                     description: "Search long-term memory documents.".into(),
                     when_to_use: "Use for stable facts and preferences.".into(),
                     when_not_to_use: "Do not use when the exact memory entry is already known."
@@ -647,16 +647,16 @@ mod tests {
                     idempotent: true,
                 },
                 ToolDescriptor {
-                    name: "memory.get".into(),
+                    name: "memory_get".into(),
                     description: "Read a memory entry by ref.".into(),
-                    when_to_use: "Use after memory.search or with a known memory_ref.".into(),
+                    when_to_use: "Use after memory_search or with a known memory_ref.".into(),
                     when_not_to_use: "Do not use to discover candidates.".into(),
                     arguments_schema: json!({ "memory_ref": "string" }),
                     default_timeout_secs: 5,
                     idempotent: true,
                 },
                 ToolDescriptor {
-                    name: "knowledge.search".into(),
+                    name: "knowledge_search".into(),
                     description: "Search knowledge libraries.".into(),
                     when_to_use: "Use for evidence-oriented retrieval.".into(),
                     when_not_to_use: "Do not use when the exact document is already known.".into(),
@@ -665,9 +665,9 @@ mod tests {
                     idempotent: true,
                 },
                 ToolDescriptor {
-                    name: "knowledge.get".into(),
+                    name: "knowledge_get".into(),
                     description: "Read a knowledge document by ref.".into(),
-                    when_to_use: "Use after knowledge.search or with a known doc_ref.".into(),
+                    when_to_use: "Use after knowledge_search or with a known doc_ref.".into(),
                     when_not_to_use: "Do not use to discover candidates.".into(),
                     arguments_schema: json!({ "doc_ref": "string" }),
                     default_timeout_secs: 5,
@@ -692,10 +692,10 @@ mod tests {
         assert!(xml.contains("<tool name=\"read\""));
         assert!(xml.contains("<tool name=\"edit\""));
         assert!(xml.contains("<tool name=\"write\""));
-        assert!(xml.contains("<tool name=\"memory.search\""));
-        assert!(xml.contains("<tool name=\"memory.get\""));
-        assert!(xml.contains("<tool name=\"knowledge.search\""));
-        assert!(xml.contains("<tool name=\"knowledge.get\""));
+        assert!(xml.contains("<tool name=\"memory_search\""));
+        assert!(xml.contains("<tool name=\"memory_get\""));
+        assert!(xml.contains("<tool name=\"knowledge_search\""));
+        assert!(xml.contains("<tool name=\"knowledge_get\""));
         assert!(xml.contains("<message kind=\"assistant\">"));
         assert!(xml.contains("<message kind=\"tool_result\">"));
         assert!(xml.contains("<message kind=\"user\">"));

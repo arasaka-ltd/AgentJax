@@ -39,9 +39,9 @@ impl Plugin for KnowledgeGetToolPlugin {
 impl ToolPlugin for KnowledgeGetToolPlugin {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            name: "knowledge.get".into(),
+            name: "knowledge_get".into(),
             description: "Read a knowledge document by stable ref or path.".into(),
-            when_to_use: "Use after knowledge.search or when the exact document is already known."
+            when_to_use: "Use after knowledge_search or when the exact document is already known."
                 .into(),
             when_not_to_use:
                 "Do not use when you first need to discover relevant knowledge candidates.".into(),

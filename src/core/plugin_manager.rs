@@ -786,7 +786,6 @@ mod tests {
                 )],
                 finish_reason: crate::domain::FinishReason::Completed,
                 usage: None,
-                continuation_input_items: Vec::new(),
             })
         }
     }

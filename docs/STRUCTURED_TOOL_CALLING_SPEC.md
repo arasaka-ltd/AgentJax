@@ -218,7 +218,7 @@ tool loop 至少应支持以下停止条件：
     {
       "type": "tool_call",
       "tool_call_id": "call_2",
-      "tool_name": "memory.search",
+      "tool_name": "memory_search",
       "args": { "query": "workspace defaults" }
     }
   ]
@@ -230,6 +230,12 @@ tool loop 至少应支持以下停止条件：
 - 按 item 顺序执行
 - 每个结果都记录到 event / transcript
 - 再统一回写给下一轮模型
+
+### 7.2.1 Tool Name 命名约束
+工具名必须使用 provider 兼容的稳定格式：
+- 只使用字母、数字、下划线和连字符
+- 不使用点号层级命名，例如禁止 `memory.search`、`shell.session.exec`
+- 优先使用 snake_case，例如 `memory_search`、`shell_session_exec`
 
 ### 7.3 后续可扩展并行
 未来如要并行，应由 runtime 显式决定，而不是让模型隐含决定。

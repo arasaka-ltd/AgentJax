@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{
+    builtin::tools::ToolDefinition,
     config::{
         AgentDefinition, ModelCatalogSnapshot, ModelInfoSnapshot, OpenAiProviderConfig,
         ProviderModelCatalog,
@@ -241,7 +242,7 @@ impl OpenAiProviderAdapter {
         let response = client
             .post(self.config.endpoint_url("responses"))
             .headers(self.request_headers()?)
-            .json(&self.responses_request_body(agent, &request))
+            .json(&self.responses_request_body(agent, &request)?)
             .send()
             .await?;
         if !response.status().is_success() {
@@ -251,13 +252,8 @@ impl OpenAiProviderAdapter {
         }
 
         let payload: Value = response.json().await?;
-        let normalized: OpenAiResponsesApiResponse = serde_json::from_value(payload.clone())?;
-        let continuation_input_items = payload
-            .get("output")
-            .and_then(|value| value.as_array())
-            .cloned()
-            .unwrap_or_default();
-        normalize_model_turn_output(normalized, continuation_input_items)
+        let normalized: OpenAiResponsesApiResponse = serde_json::from_value(payload)?;
+        normalize_model_turn_output(normalized)
     }
 
     pub async fn prompt_text(&self, agent: &AgentDefinition, prompt: &str) -> Result<String> {
@@ -296,18 +292,13 @@ impl OpenAiProviderAdapter {
         &self,
         agent: &AgentDefinition,
         request: &ProviderPromptRequest,
-    ) -> Value {
-        let input = if request.input_items.is_empty() {
-            json!([{
-                "role": "user",
-                "content": request.prompt,
-            }])
-        } else {
-            Value::Array(request.input_items.clone())
-        };
+    ) -> Result<Value> {
         let mut body = json!({
             "model": agent.model,
-            "input": input,
+            "input": [{
+                "role": "user",
+                "content": request.prompt,
+            }],
         });
         if let Some(preamble) = &agent.preamble {
             body["instructions"] = Value::String(preamble.clone());
@@ -323,28 +314,30 @@ impl OpenAiProviderAdapter {
                 request
                     .tools
                     .iter()
-                    .map(|tool| {
-                        json!({
+                    .map(|tool| -> Result<Value> {
+                        let ToolDefinition {
+                            name,
+                            description,
+                            parameters,
+                        } = tool.definition()?;
+                        Ok(json!({
                             "type": "function",
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.arguments_schema,
+                            "name": name,
+                            "description": description,
+                            "parameters": parameters,
                             "strict": false,
-                        })
+                        }))
                     })
-                    .collect(),
+                    .collect::<Result<Vec<_>>>()?,
             );
             body["tool_choice"] = json!("auto");
             body["parallel_tool_calls"] = json!(false);
         }
-        body
+        Ok(body)
     }
 }
 
-fn normalize_model_turn_output(
-    payload: OpenAiResponsesApiResponse,
-    continuation_input_items: Vec<Value>,
-) -> Result<ModelTurnOutput> {
+fn normalize_model_turn_output(payload: OpenAiResponsesApiResponse) -> Result<ModelTurnOutput> {
     let mut items = Vec::new();
 
     for (index, item) in payload.output.into_iter().enumerate() {
@@ -359,7 +352,7 @@ fn normalize_model_turn_output(
                 if text.trim().is_empty() {
                     continue;
                 }
-                items.extend(parse_text_fallback_items(
+                items.extend(parse_text_response_items(
                     &collapse_repeated_text(text),
                     id.unwrap_or_else(|| format!("msg_{index}")),
                 )?);
@@ -391,7 +384,7 @@ fn normalize_model_turn_output(
 
     if items.is_empty() {
         if let Some(text) = payload.output_text.filter(|text| !text.trim().is_empty()) {
-            items.extend(parse_text_fallback_items(
+            items.extend(parse_text_response_items(
                 &collapse_repeated_text(text),
                 "out_text".into(),
             )?);
@@ -419,53 +412,18 @@ fn normalize_model_turn_output(
             input_tokens: usage.input_tokens,
             output_tokens: usage.output_tokens,
         }),
-        continuation_input_items,
     })
 }
 
-fn parse_text_fallback_items(text: &str, item_prefix: String) -> Result<Vec<ModelOutputItem>> {
+fn parse_text_response_items(text: &str, item_prefix: String) -> Result<Vec<ModelOutputItem>> {
     let mut items = Vec::new();
-    let mut assistant_lines = Vec::new();
-
-    for (index, line) in text.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            assistant_lines.push(String::new());
-            continue;
-        }
-
-        if let Some(payload) = trimmed.strip_prefix("TOOL_CALL ") {
-            let value: Value = serde_json::from_str(payload).map_err(|error| {
-                anyhow!("invalid compatibility tool call payload from model adapter: {error}")
-            })?;
-            let tool_name = value
-                .get("tool")
-                .and_then(|value| value.as_str())
-                .ok_or_else(|| anyhow!("compatibility tool call missing tool"))?;
-            let args = value.get("args").cloned().unwrap_or_else(|| json!({}));
-            let timeout_secs = value.get("timeout_secs").and_then(|value| value.as_u64());
-            items.push(ModelOutputItem::ToolCall(ToolCallItem {
-                item_id: format!("{item_prefix}_tool_{index}"),
-                tool_call_id: format!("{item_prefix}_call_{index}_{tool_name}"),
-                tool_name: tool_name.into(),
-                args,
-                timeout_secs,
-            }));
-        } else {
-            assistant_lines.push(line.to_string());
-        }
-    }
-
-    let assistant_text = assistant_lines.join("\n").trim().to_string();
+    let assistant_text = text.trim().to_string();
     if !assistant_text.is_empty() {
-        items.insert(
-            0,
-            ModelOutputItem::AssistantText(AssistantTextItem {
-                item_id: format!("{item_prefix}_text"),
-                text: assistant_text,
-                is_partial: false,
-            }),
-        );
+        items.push(ModelOutputItem::AssistantText(AssistantTextItem {
+            item_id: format!("{item_prefix}_text"),
+            text: assistant_text,
+            is_partial: false,
+        }));
     }
 
     Ok(items)
@@ -706,7 +664,7 @@ mod tests {
         builtin::tools::ToolDescriptor,
         config::AgentDefinition,
         core::plugin::ProviderPromptRequest,
-        domain::{ModelOutputItem, ToolCallItem},
+        domain::{AssistantTextItem, ModelOutputItem},
     };
 
     #[tokio::test]
@@ -789,10 +747,8 @@ mod tests {
             "provider-ok"
         );
         assert_eq!(
-            collapse_repeated_text(
-                "TOOL_CALL {\"tool\":\"read\"}TOOL_CALL {\"tool\":\"read\"}".into()
-            ),
-            "TOOL_CALL {\"tool\":\"read\"}"
+            collapse_repeated_text("provider-okprovider-okprovider-ok".into()),
+            "provider-ok"
         );
         assert_eq!(collapse_repeated_text("unique text".into()), "unique text");
     }
@@ -807,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_text_fallback_tool_calls_into_structured_items() {
+    fn normalizes_text_fallback_into_assistant_text() {
         let output = normalize_model_turn_output(OpenAiResponsesApiResponse {
             id: Some("resp_1".into()),
             usage: None,
@@ -817,31 +773,27 @@ mod tests {
                 content: vec![OpenAiResponsesContentItem {
                     content_type: "output_text".into(),
                     text: Some(
-                        "TOOL_CALL {\"tool\":\"read\",\"args\":{\"path\":\"Cargo.toml\"}}\nTOOL_CALL {\"tool\":\"memory.search\",\"args\":{\"query\":\"defaults\"}}".into(),
+                        "compatibility text response".into(),
                     ),
                 }],
             }],
-        }, Vec::new())
+        })
         .unwrap();
 
-        assert_eq!(output.items.len(), 2);
+        assert_eq!(output.items.len(), 1);
         assert!(matches!(
             output.items[0],
-            ModelOutputItem::ToolCall(ToolCallItem { .. })
-        ));
-        assert!(matches!(
-            output.items[1],
-            ModelOutputItem::ToolCall(ToolCallItem { .. })
+            ModelOutputItem::AssistantText(AssistantTextItem { .. })
         ));
     }
 
     #[test]
-    fn responses_request_body_includes_native_function_tools_and_input_items() {
+    fn responses_request_body_includes_native_function_tools() {
         let adapter = OpenAiProviderAdapter::new(OpenAiProviderConfig::default());
         let body = adapter.responses_request_body(
             &AgentDefinition::default(),
             &ProviderPromptRequest {
-                prompt: "ignored when input_items are present".into(),
+                prompt: "hello".into(),
                 tools: vec![ToolDescriptor {
                     name: "read".into(),
                     description: "Read a file".into(),
@@ -857,19 +809,16 @@ mod tests {
                     default_timeout_secs: 5,
                     idempotent: true,
                 }],
-                input_items: vec![json!({
-                    "type": "function_call_output",
-                    "call_id": "call_1",
-                    "output": "{\"ok\":true}"
-                })],
             },
-        );
+        )
+        .unwrap();
 
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "read");
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["parallel_tool_calls"], false);
-        assert_eq!(body["input"][0]["type"], "function_call_output");
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(body["input"][0]["content"], "hello");
     }
 
     async fn spawn_server(

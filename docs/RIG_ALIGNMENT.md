@@ -236,7 +236,7 @@ AgentJax
 应尽量与 Rig 的 tool 模型相容，而不是背道而驰。
 
 ### 9.2 对 Retrieval Tools
-`memory.search/get` 与 `knowledge.search/get` 是 AgentJax 的 domain surface。
+`memory_search/get` 与 `knowledge_search/get` 是 AgentJax 的 domain surface。
 但底层：
 - embedding
 - vector index

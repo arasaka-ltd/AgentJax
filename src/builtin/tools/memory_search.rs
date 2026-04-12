@@ -40,10 +40,10 @@ impl Plugin for MemorySearchToolPlugin {
 impl ToolPlugin for MemorySearchToolPlugin {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            name: "memory.search".into(),
+            name: "memory_search".into(),
             description: "Search long-term memory documents for relevant candidates.".into(),
             when_to_use: "Use when you need user preferences, long-term decisions, or stable project facts.".into(),
-            when_not_to_use: "Do not use when you already know the exact memory entry and can call memory.get directly.".into(),
+            when_not_to_use: "Do not use when you already know the exact memory entry and can call memory_get directly.".into(),
             arguments_schema: json!({
                 "type": "object",
                 "properties": {
@@ -65,7 +65,7 @@ impl ToolPlugin for MemorySearchToolPlugin {
             .args
             .get("query")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| anyhow::anyhow!("memory.search requires args.query"))?;
+            .ok_or_else(|| anyhow::anyhow!("memory_search requires args.query"))?;
         let top_k = call
             .args
             .get("top_k")

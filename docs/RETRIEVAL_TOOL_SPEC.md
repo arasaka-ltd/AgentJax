@@ -30,10 +30,10 @@
 - `rag.get`
 
 建议：
-- `memory.search`
-- `memory.get`
-- `knowledge.search`
-- `knowledge.get`
+- `memory_search`
+- `memory_get`
+- `knowledge_search`
+- `knowledge_get`
 
 原因：
 - Agent 心智模型应该围绕“查什么域”，而不是“调用哪个引擎层”
@@ -74,13 +74,13 @@
 ---
 ## 4. Tool Catalog
 第一阶段最小闭环定义四个工具：
-- `memory.search`
-- `memory.get`
-- `knowledge.search`
-- `knowledge.get`
+- `memory_search`
+- `memory_get`
+- `knowledge_search`
+- `knowledge_get`
 
 ---
-## 5. `memory.search`
+## 5. `memory_search`
 ### 5.1 作用
 在长期记忆域中搜索相关候选结果。
 
@@ -166,11 +166,11 @@
 
 ### 5.6 使用策略
 - 需要判断“有没有相关长期记忆”时先调用
-- 已知明确目标文档时不必先 search，可直接 `memory.get`
-- 不要把 `memory.search` 当成“取全文”
+- 已知明确目标文档时不必先 search，可直接 `memory_get`
+- 不要把 `memory_search` 当成“取全文”
 
 ---
-## 6. `memory.get`
+## 6. `memory_get`
 ### 6.1 作用
 读取某个长期记忆文档的完整内容或精确行段。
 
@@ -221,7 +221,7 @@
 - 用户明确要求“读取某个记忆条目”时调用
 
 ---
-## 7. `knowledge.search`
+## 7. `knowledge_search`
 ### 7.1 作用
 在领域知识库中搜索证据候选。
 
@@ -294,7 +294,7 @@
 - 对大型知识库尽量不要无范围搜索后立刻全文读取
 
 ---
-## 8. `knowledge.get`
+## 8. `knowledge_get`
 ### 8.1 作用
 读取知识库中的完整文档或精确片段。
 

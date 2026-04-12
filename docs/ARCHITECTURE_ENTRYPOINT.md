@@ -98,8 +98,8 @@ AgentJax 当前的正式架构规范由以下文档组成。
 - 作用：定义 Agent-facing retrieval tool surface
 - 包括：
   - 为什么不直接把 `RAG` 暴露成 agent tool
-  - `memory.search` / `memory.get`
-  - `knowledge.search` / `knowledge.get`
+  - `memory_search` / `memory_get`
+  - `knowledge_search` / `knowledge_get`
   - `search` 与 `get` 的职责分离
   - `library` / `path` / stable ref 的参数边界
 ### Spec 6.2：File Tools
@@ -124,7 +124,7 @@ AgentJax 当前的正式架构规范由以下文档组成。
 - `docs/SHELL_TOOL_SPEC.md`
 - 作用：定义 Agent-facing shell execution tool surface
 - 包括：
-  - `shell.exec` 与 `shell.session.*` 的语义分离
+  - `shell_exec` 与 `shell_session_*` 的语义分离
   - 无状态单次命令执行
   - 有状态 shell session
   - 多会话并发与 session 选择

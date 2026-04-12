@@ -101,7 +101,7 @@ impl RetrievalBridgeContextPlugin {
         } else if let Some(path) = &request.path {
             PathBuf::from(path)
         } else {
-            bail!("memory.get requires memory_ref or path");
+            bail!("memory_get requires memory_ref or path");
         };
         let stable_ref = request
             .memory_ref
@@ -157,7 +157,7 @@ impl RetrievalBridgeContextPlugin {
                 request.library.clone(),
             )
         } else {
-            bail!("knowledge.get requires doc_ref or path");
+            bail!("knowledge_get requires doc_ref or path");
         };
         self.get_content(
             path,

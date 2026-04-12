@@ -43,10 +43,10 @@
 ## 4. 适用场景
 ### 4.1 长命令轮询
 例如：
-1. Agent 在 `shell.session.exec` 里启动 `npm test --watch`
+1. Agent 在 `shell_session_exec` 里启动 `npm test --watch`
 2. 当前没有最终结果
 3. Agent 调用 `sleep`
-4. 一段时间后恢复，再调用 `shell.session.read`
+4. 一段时间后恢复，再调用 `shell_session_read`
 
 ### 4.2 外部异步任务
 例如：
@@ -197,14 +197,14 @@
 
 ---
 ## 10. 与 Shell Tool 的关系
-`sleep` 和 `shell.session.*` 是天然配套的。
+`sleep` 和 `shell_session_*` 是天然配套的。
 
 推荐模式：
-1. `shell.session.open`
-2. `shell.session.exec`
+1. `shell_session_open`
+2. `shell_session_exec`
 3. `sleep`
-4. `shell.session.read`
-5. 视结果决定继续 `sleep`、继续 `shell.session.exec`，或结束任务
+4. `shell_session_read`
+5. 视结果决定继续 `sleep`、继续 `shell_session_exec`，或结束任务
 
 也就是说：
 - shell 负责执行

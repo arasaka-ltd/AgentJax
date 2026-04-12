@@ -17,7 +17,6 @@ pub struct AgentPromptRequest {
     pub agent_id: Option<String>,
     pub agent_override: Option<AgentDefinition>,
     pub tools: Vec<crate::builtin::tools::ToolDescriptor>,
-    pub input_items: Vec<serde_json::Value>,
 }
 
 impl ApplicationRuntime {
@@ -67,7 +66,6 @@ impl ApplicationRuntime {
                 ProviderPromptRequest {
                     prompt: request.prompt,
                     tools: request.tools,
-                    input_items: request.input_items,
                 },
             )
             .await

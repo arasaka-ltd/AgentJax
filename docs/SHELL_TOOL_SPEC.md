@@ -12,16 +12,16 @@
 
 ---
 ## 2. 一句话边界
-- `shell.exec`：一次性执行单条命令，不保留上下文
-- `shell.session.open`：创建一个有状态 shell 会话
-- `shell.session.exec`：在指定会话中继续执行命令
-- `shell.session.read`：读取某个会话的新输出、状态与最近结果
-- `shell.session.list`：列出当前可用 shell 会话
-- `shell.session.close`：关闭某个会话
+- `shell_exec`：一次性执行单条命令，不保留上下文
+- `shell_session_open`：创建一个有状态 shell 会话
+- `shell_session_exec`：在指定会话中继续执行命令
+- `shell_session_read`：读取某个会话的新输出、状态与最近结果
+- `shell_session_list`：列出当前可用 shell 会话
+- `shell_session_close`：关闭某个会话
 
 可选增强：
-- `shell.session.interrupt`
-- `shell.session.resize`
+- `shell_session_interrupt`
+- `shell_session_resize`
 
 ---
 ## 3. 设计原则
@@ -32,7 +32,7 @@ Agent 不应为了普通读写文件而优先使用 shell。
 - 看文件，用 `read`
 - 改文本，用 `edit`
 - 新建或覆盖文件，用 `write`
-- 只有确实需要命令执行、进程控制、环境探测、构建、测试时才用 `shell.*`
+- 只有确实需要命令执行、进程控制、环境探测、构建、测试时才用 `shell_*`
 
 ### 3.2 必须显式区分无状态与有状态
 这两个能力不能混成一个模糊的 `shell`。
@@ -43,7 +43,7 @@ Agent 不应为了普通读写文件而优先使用 shell。
 - 如果协议不分开，Agent 很容易误判上下文是否会保留
 
 ### 3.3 有状态会话应尽量接近用户使用终端的直觉
-`shell.session.*` 应尽量模拟一个真实终端会话：
+`shell_session_*` 应尽量模拟一个真实终端会话：
 - 当前工作目录会保留
 - `export` 的环境变量会保留
 - shell state 会保留
@@ -88,21 +88,21 @@ Agent 可能需要同时做这些事：
 建议第一阶段定义以下工具。
 
 ### 4.1 Stateless
-- `shell.exec`
+- `shell_exec`
 
 ### 4.2 Stateful
-- `shell.session.open`
-- `shell.session.exec`
-- `shell.session.read`
-- `shell.session.list`
-- `shell.session.close`
+- `shell_session_open`
+- `shell_session_exec`
+- `shell_session_read`
+- `shell_session_list`
+- `shell_session_close`
 
 ### 4.3 Optional
-- `shell.session.interrupt`
-- `shell.session.resize`
+- `shell_session_interrupt`
+- `shell_session_resize`
 
 ---
-## 5. `shell.exec`
+## 5. `shell_exec`
 ### 5.1 作用
 执行一次性命令。
 
@@ -120,7 +120,7 @@ Agent 可能需要同时做这些事：
 
 ### 5.2 语义
 - 每次调用都是独立执行
-- 默认不继承之前任意 `shell.exec` 的上下文
+- 默认不继承之前任意 `shell_exec` 的上下文
 - 调用结束后不保留 shell 状态
 
 ### 5.3 输入
@@ -173,16 +173,16 @@ Agent 可能需要同时做这些事：
 
 ### 5.6 使用策略
 - 单步探测、构建、检查时优先使用
-- 如果命令之间需要共享环境或目录，不要连续调用 `shell.exec`，改用 `shell.session.*`
+- 如果命令之间需要共享环境或目录，不要连续调用 `shell_exec`，改用 `shell_session_*`
 
 ---
-## 6. `shell.session.open`
+## 6. `shell_session_open`
 ### 6.1 作用
 创建一个新的有状态 shell 会话。
 
 ### 6.2 语义
 - 创建后返回 `session_id`
-- 后续 `shell.session.exec` 在同一会话中继续运行
+- 后续 `shell_session_exec` 在同一会话中继续运行
 - 会话应保留：
   - 当前工作目录
   - exported env
@@ -215,7 +215,7 @@ Agent 可能需要同时做这些事：
 ```
 
 ---
-## 7. `shell.session.exec`
+## 7. `shell_session_exec`
 ### 7.1 作用
 在指定 shell 会话中执行一条命令。
 
@@ -254,10 +254,10 @@ Agent 可能需要同时做这些事：
 说明：
 - 不要求同步返回完整输出
 - 长任务可先返回 `running`
-- 后续由 `shell.session.read` 读取结果
+- 后续由 `shell_session_read` 读取结果
 
 ---
-## 8. `shell.session.read`
+## 8. `shell_session_read`
 ### 8.1 作用
 读取 shell 会话的新增输出、最近执行状态与当前会话元信息。
 
@@ -302,7 +302,7 @@ Agent 可能需要同时做这些事：
 - 必须能看出当前会话是否仍在运行命令
 
 ---
-## 9. `shell.session.list`
+## 9. `shell_session_list`
 ### 9.1 作用
 列出当前所有 shell 会话，供 Agent 选择继续在哪个会话工作。
 
@@ -331,7 +331,7 @@ Agent 可能需要同时做这些事：
 ```
 
 ---
-## 10. `shell.session.close`
+## 10. `shell_session_close`
 ### 10.1 作用
 关闭某个 shell 会话并释放资源。
 
@@ -356,7 +356,7 @@ Agent 可能需要同时做这些事：
 ```
 
 ---
-## 11. Optional: `shell.session.interrupt`
+## 11. Optional: `shell_session_interrupt`
 ### 11.1 作用
 向当前前台执行发送中断信号。
 
@@ -442,13 +442,13 @@ shell 执行必须进入统一 runtime event log。
 
 ---
 ## 14. 与 Turn / Task Runtime 的关系
-### 14.1 `shell.exec`
+### 14.1 `shell_exec`
 更像一次普通 tool call：
 - 发起
 - 等待结束或超时
 - 返回结果
 
-### 14.2 `shell.session.*`
+### 14.2 `shell_session_*`
 更像 runtime resource + long-running execution：
 - 一个 turn 可以创建会话
 - 后续 turn 可以继续同一会话
@@ -491,20 +491,20 @@ shell 执行必须进入统一 runtime event log。
 ## 16. Agent 使用策略
 建议策略如下：
 
-- 单条探测命令优先用 `shell.exec`
-- 需要 `cd` / `export` / `source venv/bin/activate` / 长时间观察时，用 `shell.session.open + shell.session.exec`
+- 单条探测命令优先用 `shell_exec`
+- 需要 `cd` / `export` / `source venv/bin/activate` / 长时间观察时，用 `shell_session_open + shell_session_exec`
 - 需要并行跑多个命令时，创建多个 shell session
 - 在继续执行前，Agent 应先决定“复用已有会话”还是“新开会话”
-- 查看长任务结果时，优先用 `shell.session.read`，而不是重复执行同一命令
+- 查看长任务结果时，优先用 `shell_session_read`，而不是重复执行同一命令
 
 ---
 ## 17. 第一阶段最小验收标准
-- 有 `shell.exec`
-- 有 `shell.session.open`
-- 有 `shell.session.exec`
-- 有 `shell.session.read`
-- 有 `shell.session.list`
-- 有 `shell.session.close`
+- 有 `shell_exec`
+- 有 `shell_session_open`
+- 有 `shell_session_exec`
+- 有 `shell_session_read`
+- 有 `shell_session_list`
+- 有 `shell_session_close`
 - 同时支持至少多个并存 shell 会话
 - 同一会话内 `cd` 和 `export` 的效果可被后续命令观察到
 - Agent 能明确选择继续某个 `session_id`

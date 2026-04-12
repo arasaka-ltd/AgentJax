@@ -221,14 +221,14 @@ knowledge/
 
 ### 5.6 与 Retrieval Tool Surface 的对应关系
 为了让 Agent 明确区分“查长期记忆”和“查领域知识”，建议 retrieval tool surface 直接映射这两个域：
-- `memory.search`
-- `memory.get`
-- `knowledge.search`
-- `knowledge.get`
+- `memory_search`
+- `memory_get`
+- `knowledge_search`
+- `knowledge_get`
 
 其中：
-- `memory.search/get` 主要面向 `MEMORY.md` 与 `memory/**`
-- `knowledge.search/get` 主要面向 `knowledge/<library>/**`
+- `memory_search/get` 主要面向 `MEMORY.md` 与 `memory/**`
+- `knowledge_search/get` 主要面向 `knowledge/<library>/**`
 
 这层映射应稳定存在，避免让 Agent 直接暴露到底层 `RAG` collection 细节。
 ---

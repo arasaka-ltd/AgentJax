@@ -39,10 +39,10 @@ impl Plugin for MemoryGetToolPlugin {
 impl ToolPlugin for MemoryGetToolPlugin {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            name: "memory.get".into(),
+            name: "memory_get".into(),
             description: "Read a memory document by stable ref or path.".into(),
             when_to_use:
-                "Use after memory.search or when you already know the target memory entry.".into(),
+                "Use after memory_search or when you already know the target memory entry.".into(),
             when_not_to_use: "Do not use when you need to discover candidate memory entries first."
                 .into(),
             arguments_schema: json!({

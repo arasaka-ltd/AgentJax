@@ -177,8 +177,8 @@ pub enum TurnPhase {
 
 ### 4.6 Shell Session 与 Turn 的关系
 需要明确一个运行时边界：
-- `shell.exec` 更接近普通一次性 tool call
-- `shell.session.*` 更接近可跨 turn 持续存在的 runtime resource
+- `shell_exec` 更接近普通一次性 tool call
+- `shell_session_*` 更接近可跨 turn 持续存在的 runtime resource
 
 这意味着：
 - 一个 turn 可以创建 shell session

@@ -711,7 +711,7 @@ impl ShellSessionManager {
 
     async fn resize_session(&self, session_id: &str, columns: u16, rows: u16) -> Result<Value> {
         if columns == 0 || rows == 0 {
-            bail!("shell.session.resize requires positive cols and rows");
+            bail!("shell_session_resize requires positive cols and rows");
         }
         let (state, child) = self.session_refs(session_id)?;
         self.refresh_session_process(&state, &child).await?;
@@ -1033,7 +1033,7 @@ impl Plugin for ShellSessionResizeToolPlugin {
 impl ToolPlugin for ShellExecToolPlugin {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            name: "shell.exec".into(),
+            name: "shell_exec".into(),
             description: "Run a one-shot shell command without preserving context.".into(),
             when_to_use: "Use for a single command such as pwd, ls, git status, or cargo check."
                 .into(),
@@ -1057,7 +1057,7 @@ impl ToolPlugin for ShellExecToolPlugin {
     }
 
     async fn invoke(&self, call: &ToolCall) -> Result<super::ToolOutput> {
-        let command = required_arg_str(&call.args, "command", "shell.exec")?;
+        let command = required_arg_str(&call.args, "command", "shell_exec")?;
         let env_map = optional_object(&call.args, "env")?;
         let value = manager()
             .stateless_exec(
@@ -1077,7 +1077,7 @@ impl ToolPlugin for ShellExecToolPlugin {
 impl ToolPlugin for ShellSessionOpenToolPlugin {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            name: "shell.session.open".into(),
+            name: "shell_session_open".into(),
             description: "Open a persistent shell session that retains cwd and environment."
                 .into(),
             when_to_use:
@@ -1118,10 +1118,10 @@ impl ToolPlugin for ShellSessionOpenToolPlugin {
 impl ToolPlugin for ShellSessionExecToolPlugin {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            name: "shell.session.exec".into(),
+            name: "shell_session_exec".into(),
             description: "Execute a command inside an existing persistent shell session.".into(),
             when_to_use:
-                "Use after shell.session.open when commands depend on prior cd/export/source state."
+                "Use after shell_session_open when commands depend on prior cd/export/source state."
                     .into(),
             when_not_to_use: "Do not use without a valid shell session id.".into(),
             arguments_schema: json!({
@@ -1142,8 +1142,8 @@ impl ToolPlugin for ShellSessionExecToolPlugin {
     async fn invoke(&self, call: &ToolCall) -> Result<super::ToolOutput> {
         let value = manager()
             .session_exec(
-                required_arg_str(&call.args, "session_id", "shell.session.exec")?,
-                required_arg_str(&call.args, "command", "shell.session.exec")?,
+                required_arg_str(&call.args, "session_id", "shell_session_exec")?,
+                required_arg_str(&call.args, "command", "shell_session_exec")?,
                 support::parse_optional_usize(&call.args, "timeout_secs")?.map(|v| v as u64),
                 support::parse_optional_bool(&call.args, "detach").unwrap_or(false),
             )
@@ -1156,10 +1156,10 @@ impl ToolPlugin for ShellSessionExecToolPlugin {
 impl ToolPlugin for ShellSessionReadToolPlugin {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            name: "shell.session.read".into(),
+            name: "shell_session_read".into(),
             description: "Read new stdout/stderr output and execution status from a shell session."
                 .into(),
-            when_to_use: "Use after shell.session.exec to poll output incrementally.".into(),
+            when_to_use: "Use after shell_session_exec to poll output incrementally.".into(),
             when_not_to_use: "Do not use as a substitute for re-running commands.".into(),
             arguments_schema: json!({
                 "type": "object",
@@ -1178,7 +1178,7 @@ impl ToolPlugin for ShellSessionReadToolPlugin {
     async fn invoke(&self, call: &ToolCall) -> Result<super::ToolOutput> {
         let value = manager()
             .session_read(
-                required_arg_str(&call.args, "session_id", "shell.session.read")?,
+                required_arg_str(&call.args, "session_id", "shell_session_read")?,
                 support::parse_optional_usize(&call.args, "since_seq")?.unwrap_or(0) as u64,
                 support::parse_optional_usize(&call.args, "max_bytes")?
                     .unwrap_or(DEFAULT_SESSION_READ_LIMIT),
@@ -1192,7 +1192,7 @@ impl ToolPlugin for ShellSessionReadToolPlugin {
 impl ToolPlugin for ShellSessionListToolPlugin {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            name: "shell.session.list".into(),
+            name: "shell_session_list".into(),
             description: "List currently open shell sessions.".into(),
             when_to_use: "Use to inspect available shell sessions before reusing one.".into(),
             when_not_to_use: "Do not use when you already know the target session id.".into(),
@@ -1214,7 +1214,7 @@ impl ToolPlugin for ShellSessionListToolPlugin {
 impl ToolPlugin for ShellSessionCloseToolPlugin {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            name: "shell.session.close".into(),
+            name: "shell_session_close".into(),
             description: "Close a shell session and free its resources.".into(),
             when_to_use: "Use when a shell session is no longer needed.".into(),
             when_not_to_use: "Do not use while you still need the session state or output.".into(),
@@ -1234,7 +1234,7 @@ impl ToolPlugin for ShellSessionCloseToolPlugin {
     async fn invoke(&self, call: &ToolCall) -> Result<super::ToolOutput> {
         let value = manager()
             .close_session(
-                required_arg_str(&call.args, "session_id", "shell.session.close")?,
+                required_arg_str(&call.args, "session_id", "shell_session_close")?,
                 support::parse_optional_bool(&call.args, "force").unwrap_or(false),
             )
             .await?;
@@ -1246,7 +1246,7 @@ impl ToolPlugin for ShellSessionCloseToolPlugin {
 impl ToolPlugin for ShellSessionInterruptToolPlugin {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            name: "shell.session.interrupt".into(),
+            name: "shell_session_interrupt".into(),
             description:
                 "Send SIGINT or terminal interrupt to the active command in a shell session.".into(),
             when_to_use: "Use when a session command is stuck or needs Ctrl-C.".into(),
@@ -1269,7 +1269,7 @@ impl ToolPlugin for ShellSessionInterruptToolPlugin {
                 .interrupt_session(required_arg_str(
                     &call.args,
                     "session_id",
-                    "shell.session.interrupt",
+                    "shell_session_interrupt",
                 )?)
                 .await?,
         )
@@ -1280,7 +1280,7 @@ impl ToolPlugin for ShellSessionInterruptToolPlugin {
 impl ToolPlugin for ShellSessionResizeToolPlugin {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
-            name: "shell.session.resize".into(),
+            name: "shell_session_resize".into(),
             description: "Resize the terminal dimensions of a PTY-backed shell session.".into(),
             when_to_use: "Use when terminal-aware programs need updated cols and rows.".into(),
             when_not_to_use: "Do not use on non-PTY shell sessions.".into(),
@@ -1302,10 +1302,10 @@ impl ToolPlugin for ShellSessionResizeToolPlugin {
         support::json_tool_output(
             manager()
                 .resize_session(
-                    required_arg_str(&call.args, "session_id", "shell.session.resize")?,
-                    support::parse_required_usize(&call.args, "cols", "shell.session.resize")?
+                    required_arg_str(&call.args, "session_id", "shell_session_resize")?,
+                    support::parse_required_usize(&call.args, "cols", "shell_session_resize")?
                         as u16,
-                    support::parse_required_usize(&call.args, "rows", "shell.session.resize")?
+                    support::parse_required_usize(&call.args, "rows", "shell_session_resize")?
                         as u16,
                 )
                 .await?,
@@ -1346,7 +1346,7 @@ mod tests {
     async fn shell_exec_runs_one_shot_command() {
         let output = ShellExecToolPlugin
             .invoke(&tool_call(
-                "shell.exec",
+                "shell_exec",
                 json!({ "command": "printf 'hello\\n'" }),
             ))
             .await
@@ -1366,7 +1366,7 @@ mod tests {
 
         let opened = ShellSessionOpenToolPlugin
             .invoke(&tool_call(
-                "shell.session.open",
+                "shell_session_open",
                 json!({ "cwd": root.display().to_string() }),
             ))
             .await
@@ -1375,7 +1375,7 @@ mod tests {
 
         ShellSessionExecToolPlugin
             .invoke(&tool_call(
-                "shell.session.exec",
+                "shell_session_exec",
                 json!({
                     "session_id": session_id,
                     "command": format!(
@@ -1399,7 +1399,7 @@ mod tests {
 
         let _ = ShellSessionCloseToolPlugin
             .invoke(&tool_call(
-                "shell.session.close",
+                "shell_session_close",
                 json!({ "session_id": session_id, "force": true }),
             ))
             .await
@@ -1410,14 +1410,14 @@ mod tests {
     #[tokio::test]
     async fn shell_session_interrupt_stops_running_command() {
         let opened = ShellSessionOpenToolPlugin
-            .invoke(&tool_call("shell.session.open", json!({ "pty": true })))
+            .invoke(&tool_call("shell_session_open", json!({ "pty": true })))
             .await
             .unwrap();
         let session_id = opened.metadata["session_id"].as_str().unwrap().to_string();
 
         ShellSessionExecToolPlugin
             .invoke(&tool_call(
-                "shell.session.exec",
+                "shell_session_exec",
                 json!({ "session_id": session_id, "command": "sleep 10" }),
             ))
             .await
@@ -1426,7 +1426,7 @@ mod tests {
         sleep(Duration::from_millis(100)).await;
         let interrupted = ShellSessionInterruptToolPlugin
             .invoke(&tool_call(
-                "shell.session.interrupt",
+                "shell_session_interrupt",
                 json!({ "session_id": session_id }),
             ))
             .await
@@ -1438,7 +1438,7 @@ mod tests {
 
         let _ = ShellSessionCloseToolPlugin
             .invoke(&tool_call(
-                "shell.session.close",
+                "shell_session_close",
                 json!({ "session_id": session_id, "force": true }),
             ))
             .await
@@ -1448,14 +1448,14 @@ mod tests {
     #[tokio::test]
     async fn shell_session_resize_reports_non_pty_sessions() {
         let opened = ShellSessionOpenToolPlugin
-            .invoke(&tool_call("shell.session.open", json!({ "pty": false })))
+            .invoke(&tool_call("shell_session_open", json!({ "pty": false })))
             .await
             .unwrap();
         let session_id = opened.metadata["session_id"].as_str().unwrap().to_string();
 
         let resized = ShellSessionResizeToolPlugin
             .invoke(&tool_call(
-                "shell.session.resize",
+                "shell_session_resize",
                 json!({ "session_id": session_id, "cols": 120, "rows": 40 }),
             ))
             .await
@@ -1465,7 +1465,7 @@ mod tests {
 
         let _ = ShellSessionCloseToolPlugin
             .invoke(&tool_call(
-                "shell.session.close",
+                "shell_session_close",
                 json!({ "session_id": session_id, "force": true }),
             ))
             .await

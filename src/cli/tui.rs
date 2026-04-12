@@ -4,8 +4,15 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use crossterm::style::{Attribute, Color, Stylize};
+use crossterm::{
+    cursor::{self, MoveToColumn},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    execute,
+    style::{Attribute, Color, Stylize},
+    terminal::{self, Clear, ClearType},
+};
 use serde_json::json;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     api::{
@@ -30,6 +37,7 @@ struct TuiApp {
     session_id: String,
     session: SessionGetResponse,
     rendered_messages: usize,
+    input: InputBuffer,
 }
 
 struct SubmitRenderState {
@@ -67,6 +75,7 @@ impl TuiApp {
             session_id,
             session,
             rendered_messages: 0,
+            input: InputBuffer::default(),
         })
     }
 
@@ -78,7 +87,7 @@ impl TuiApp {
             self.refresh_session().await?;
             self.render_new_messages(SubmitRenderState::default());
 
-            let Some(input) = read_prompt_line("you> ").await? else {
+            let Some(input) = self.read_prompt_line("you> ")? else {
                 println!();
                 break;
             };
@@ -94,6 +103,23 @@ impl TuiApp {
         }
 
         Ok(())
+    }
+
+    fn read_prompt_line(&mut self, prompt: &str) -> Result<Option<String>> {
+        let _guard = RawModeGuard::enter()?;
+        self.input.render(prompt)?;
+
+        loop {
+            match event::read().context("failed to read terminal event")? {
+                Event::Key(key) => {
+                    if let Some(result) = self.input.handle_key(prompt, key)? {
+                        return Ok(result);
+                    }
+                }
+                Event::Resize(_, _) => self.input.render(prompt)?,
+                _ => {}
+            }
+        }
     }
 
     async fn refresh_session(&mut self) -> Result<()> {
@@ -318,6 +344,219 @@ fn print_labeled_text(label: &str, color: Color, content: &str) {
     println!();
 }
 
+#[derive(Default)]
+struct InputBuffer {
+    text: String,
+    cursor: usize,
+    history: Vec<String>,
+    history_index: Option<usize>,
+    history_draft: String,
+}
+
+impl InputBuffer {
+    fn handle_key(&mut self, prompt: &str, key: KeyEvent) -> Result<Option<Option<String>>> {
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.clear_prompt_line()?;
+                return Ok(Some(None));
+            }
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if self.text.is_empty() {
+                    self.clear_prompt_line()?;
+                    return Ok(Some(None));
+                }
+            }
+            KeyCode::Esc => {
+                self.clear_prompt_line()?;
+                return Ok(Some(None));
+            }
+            KeyCode::Enter => {
+                let submitted = self.text.clone();
+                self.commit_history();
+                execute!(io::stdout(), MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+                print!("{prompt}{submitted}");
+                println!();
+                io::stdout().flush()?;
+                self.text.clear();
+                self.cursor = 0;
+                self.history_index = None;
+                self.history_draft.clear();
+                return Ok(Some(Some(submitted)));
+            }
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Left => self.move_left(),
+            KeyCode::Right => self.move_right(),
+            KeyCode::Home => self.move_home(),
+            KeyCode::End => self.move_end(),
+            KeyCode::Up => self.history_up(),
+            KeyCode::Down => self.history_down(),
+            KeyCode::Char(ch)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.insert_char(ch);
+            }
+            _ => {}
+        }
+
+        self.render(prompt)?;
+        Ok(None)
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        let mut chars = self.chars();
+        chars.insert(self.cursor, ch);
+        self.text = chars.into_iter().collect();
+        self.cursor += 1;
+        self.reset_history_navigation();
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let mut chars = self.chars();
+        chars.remove(self.cursor - 1);
+        self.text = chars.into_iter().collect();
+        self.cursor -= 1;
+        self.reset_history_navigation();
+    }
+
+    fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    fn move_right(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.char_len());
+    }
+
+    fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn move_end(&mut self) {
+        self.cursor = self.char_len();
+    }
+
+    fn history_up(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        match self.history_index {
+            None => {
+                self.history_draft = self.text.clone();
+                self.history_index = Some(self.history.len().saturating_sub(1));
+            }
+            Some(0) => {}
+            Some(index) => self.history_index = Some(index - 1),
+        }
+        if let Some(index) = self.history_index {
+            self.set_text(self.history[index].clone());
+        }
+    }
+
+    fn history_down(&mut self) {
+        let Some(index) = self.history_index else {
+            return;
+        };
+        if index + 1 >= self.history.len() {
+            self.history_index = None;
+            self.set_text(self.history_draft.clone());
+            self.history_draft.clear();
+            return;
+        }
+        self.history_index = Some(index + 1);
+        self.set_text(self.history[index + 1].clone());
+    }
+
+    fn commit_history(&mut self) {
+        let trimmed = self.text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if self.history.last().map(|item| item.as_str()) != Some(self.text.as_str()) {
+            self.history.push(self.text.clone());
+        }
+    }
+
+    fn reset_history_navigation(&mut self) {
+        if self.history_index.is_some() {
+            self.history_index = None;
+            self.history_draft.clear();
+        }
+    }
+
+    fn set_text(&mut self, text: String) {
+        self.text = text;
+        self.cursor = self.char_len();
+    }
+
+    fn render(&self, prompt: &str) -> Result<()> {
+        let prompt_width = UnicodeWidthStr::width(prompt);
+        let cursor_width = prompt_width + display_width(&self.text_before_cursor());
+
+        execute!(
+            io::stdout(),
+            MoveToColumn(0),
+            Clear(ClearType::CurrentLine),
+            cursor::Show
+        )?;
+        print!("{prompt}{}", self.text);
+        execute!(
+            io::stdout(),
+            MoveToColumn((cursor_width as u16).saturating_add(1))
+        )?;
+        io::stdout().flush()?;
+        Ok(())
+    }
+
+    fn clear_prompt_line(&self) -> Result<()> {
+        execute!(
+            io::stdout(),
+            MoveToColumn(0),
+            Clear(ClearType::CurrentLine),
+            cursor::Show
+        )?;
+        io::stdout().flush()?;
+        Ok(())
+    }
+
+    fn chars(&self) -> Vec<char> {
+        self.text.chars().collect()
+    }
+
+    fn char_len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    fn text_before_cursor(&self) -> String {
+        self.text.chars().take(self.cursor).collect()
+    }
+}
+
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn enter() -> Result<Self> {
+        terminal::enable_raw_mode().context("failed to enable raw mode")?;
+        execute!(io::stdout(), cursor::Show).context("failed to show cursor")?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+        let _ = execute!(io::stdout(), cursor::Show);
+    }
+}
+
+fn display_width(text: &str) -> usize {
+    text.chars()
+        .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0))
+        .sum()
+}
+
 fn handle_stream(stream: &StreamEnvelope, state: &mut StreamRenderState) -> io::Result<()> {
     match stream.phase {
         StreamPhase::Start => {
@@ -399,24 +638,6 @@ fn finish_active_assistant_line(state: &mut StreamRenderState) {
     state.assistant_ended_with_newline = false;
 }
 
-async fn read_prompt_line(prompt: &str) -> Result<Option<String>> {
-    let prompt = prompt.to_string();
-    tokio::task::spawn_blocking(move || -> Result<Option<String>> {
-        print!("{prompt}");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        let bytes = io::stdin().read_line(&mut input)?;
-        if bytes == 0 {
-            return Ok(None);
-        }
-
-        Ok(Some(input))
-    })
-    .await
-    .context("stdin reader task failed")?
-}
-
 async fn fetch_session(unix_socket: PathBuf, session_id: String) -> Result<SessionGetResponse> {
     request(
         unix_socket,
@@ -429,7 +650,8 @@ async fn fetch_session(unix_socket: PathBuf, session_id: String) -> Result<Sessi
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_renderable_messages, resolve_initial_session_id, INITIAL_VISIBLE_MESSAGES,
+        collect_renderable_messages, display_width, resolve_initial_session_id, InputBuffer,
+        INITIAL_VISIBLE_MESSAGES,
     };
     use crate::{
         api::{SessionGetResponse, SessionListItem, SessionListResponse, SessionMessage},
@@ -465,6 +687,48 @@ mod tests {
         let renderable = collect_renderable_messages(&session);
         assert_eq!(renderable.len(), 3);
         assert!(renderable.len() <= INITIAL_VISIBLE_MESSAGES);
+    }
+
+    #[test]
+    fn input_buffer_backspace_handles_multibyte_characters() {
+        let mut input = InputBuffer {
+            text: "你好a".into(),
+            cursor: 3,
+            ..InputBuffer::default()
+        };
+
+        input.backspace();
+        assert_eq!(input.text, "你好");
+        assert_eq!(input.cursor, 2);
+
+        input.backspace();
+        assert_eq!(input.text, "你");
+        assert_eq!(input.cursor, 1);
+    }
+
+    #[test]
+    fn input_buffer_history_navigation_round_trips_draft() {
+        let mut input = InputBuffer {
+            history: vec!["first".into(), "second".into()],
+            text: "draft".into(),
+            cursor: 5,
+            ..InputBuffer::default()
+        };
+
+        input.history_up();
+        assert_eq!(input.text, "second");
+        input.history_up();
+        assert_eq!(input.text, "first");
+        input.history_down();
+        assert_eq!(input.text, "second");
+        input.history_down();
+        assert_eq!(input.text, "draft");
+    }
+
+    #[test]
+    fn display_width_counts_wide_characters() {
+        assert_eq!(display_width("abc"), 3);
+        assert_eq!(display_width("你好"), 4);
     }
 
     fn sample_session(messages: Vec<SessionMessage>) -> SessionGetResponse {

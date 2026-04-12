@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelTurnOutput {
     pub output_id: String,
@@ -9,8 +9,6 @@ pub struct ModelTurnOutput {
     pub finish_reason: FinishReason,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ModelUsage>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub continuation_input_items: Vec<Value>,
 }
 
 impl ModelTurnOutput {

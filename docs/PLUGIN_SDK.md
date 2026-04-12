@@ -394,7 +394,7 @@ pub struct PluginContext {
 ctx.models.generate(...)
 ctx.models.embed(...)
 ctx.rag.query(...)
-ctx.knowledge.search(...)
+ctx.knowledge_search(...)
 ctx.audio.tts(...)
 ctx.audio.st(...)
 ctx.memory.recall(...)
