@@ -13,6 +13,7 @@ pub mod knowledge_search;
 pub mod memory_get;
 pub mod memory_search;
 pub mod read;
+pub mod shell;
 pub mod support;
 pub mod write;
 
@@ -22,6 +23,11 @@ pub use knowledge_search::KnowledgeSearchToolPlugin;
 pub use memory_get::MemoryGetToolPlugin;
 pub use memory_search::MemorySearchToolPlugin;
 pub use read::ReadToolPlugin;
+pub use shell::{
+    ShellExecToolPlugin, ShellSessionCloseToolPlugin, ShellSessionExecToolPlugin,
+    ShellSessionInterruptToolPlugin, ShellSessionListToolPlugin, ShellSessionOpenToolPlugin,
+    ShellSessionReadToolPlugin, ShellSessionResizeToolPlugin,
+};
 pub use write::WriteToolPlugin;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -75,6 +81,14 @@ impl ToolRegistry {
         registry.register(Arc::new(MemoryGetToolPlugin));
         registry.register(Arc::new(KnowledgeSearchToolPlugin));
         registry.register(Arc::new(KnowledgeGetToolPlugin));
+        registry.register(Arc::new(ShellExecToolPlugin));
+        registry.register(Arc::new(ShellSessionOpenToolPlugin));
+        registry.register(Arc::new(ShellSessionExecToolPlugin));
+        registry.register(Arc::new(ShellSessionReadToolPlugin));
+        registry.register(Arc::new(ShellSessionListToolPlugin));
+        registry.register(Arc::new(ShellSessionCloseToolPlugin));
+        registry.register(Arc::new(ShellSessionInterruptToolPlugin));
+        registry.register(Arc::new(ShellSessionResizeToolPlugin));
         registry
     }
 }

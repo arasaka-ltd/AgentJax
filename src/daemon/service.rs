@@ -1562,6 +1562,7 @@ impl Daemon {
     }
 
     async fn execute_tool_call(&self, tool_call: &ToolCall) -> Result<String, ApiError> {
+        self.record_shell_tool_started(tool_call)?;
         self.record_event(
             tool_call.session_id.as_deref().unwrap_or("session.default"),
             tool_call.turn_id.as_deref().unwrap_or("turn.unknown"),
@@ -1584,6 +1585,7 @@ impl Daemon {
 
         match tool.invoke(tool_call).await {
             Ok(output) => {
+                self.record_shell_tool_result(tool_call, &output.metadata)?;
                 self.record_event(
                     tool_call.session_id.as_deref().unwrap_or("session.default"),
                     tool_call.turn_id.as_deref().unwrap_or("turn.unknown"),
@@ -1599,6 +1601,7 @@ impl Daemon {
                 Ok(output.content)
             }
             Err(error) => {
+                self.record_shell_tool_failure(tool_call, &error.to_string())?;
                 self.record_event(
                     tool_call.session_id.as_deref().unwrap_or("session.default"),
                     tool_call.turn_id.as_deref().unwrap_or("turn.unknown"),
@@ -1777,6 +1780,178 @@ impl Daemon {
                 false,
             )
         })
+    }
+
+    fn record_shell_tool_started(&self, tool_call: &ToolCall) -> Result<(), ApiError> {
+        let Some(event) = shell_tool_started_event(tool_call) else {
+            return Ok(());
+        };
+        self.record_event(
+            tool_call.session_id.as_deref().unwrap_or("session.default"),
+            tool_call.turn_id.as_deref().unwrap_or("turn.unknown"),
+            tool_call.task_id.as_deref(),
+            event.0,
+            event.1,
+        )
+    }
+
+    fn record_shell_tool_result(
+        &self,
+        tool_call: &ToolCall,
+        metadata: &Value,
+    ) -> Result<(), ApiError> {
+        for (event_type, payload) in shell_tool_result_events(tool_call, metadata) {
+            self.record_event(
+                tool_call.session_id.as_deref().unwrap_or("session.default"),
+                tool_call.turn_id.as_deref().unwrap_or("turn.unknown"),
+                tool_call.task_id.as_deref(),
+                event_type,
+                payload,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn record_shell_tool_failure(
+        &self,
+        tool_call: &ToolCall,
+        error: &str,
+    ) -> Result<(), ApiError> {
+        let Some((event_type, payload)) = shell_tool_failure_event(tool_call, error) else {
+            return Ok(());
+        };
+        self.record_event(
+            tool_call.session_id.as_deref().unwrap_or("session.default"),
+            tool_call.turn_id.as_deref().unwrap_or("turn.unknown"),
+            tool_call.task_id.as_deref(),
+            event_type,
+            payload,
+        )
+    }
+}
+
+fn shell_tool_started_event(tool_call: &ToolCall) -> Option<(EventType, Value)> {
+    match tool_call.tool_name.as_str() {
+        "shell.exec" => Some((
+            EventType::ShellExecutionStarted,
+            json!({
+                "tool_name": tool_call.tool_name,
+                "mode": "stateless",
+                "command": tool_call.args.get("command").and_then(|value| value.as_str()),
+                "cwd": tool_call.args.get("cwd").and_then(|value| value.as_str()),
+                "timeout_secs": tool_call.args.get("timeout_secs"),
+            }),
+        )),
+        "shell.session.exec" => Some((
+            EventType::ShellExecutionStarted,
+            json!({
+                "tool_name": tool_call.tool_name,
+                "mode": "session_bound",
+                "session_id": tool_call.args.get("session_id").and_then(|value| value.as_str()),
+                "command": tool_call.args.get("command").and_then(|value| value.as_str()),
+                "timeout_secs": tool_call.args.get("timeout_secs"),
+                "detach": tool_call.args.get("detach").and_then(|value| value.as_bool()).unwrap_or(false),
+            }),
+        )),
+        _ => None,
+    }
+}
+
+fn shell_tool_result_events(tool_call: &ToolCall, metadata: &Value) -> Vec<(EventType, Value)> {
+    let mut events = Vec::new();
+    match tool_call.tool_name.as_str() {
+        "shell.exec" => {
+            let exit_code = metadata.get("exit_code").and_then(|value| value.as_i64());
+            let timed_out = metadata
+                .get("timed_out")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let event_type = if timed_out || exit_code.unwrap_or_default() != 0 {
+                EventType::ShellExecutionFailed
+            } else {
+                EventType::ShellExecutionCompleted
+            };
+            events.push((
+                event_type,
+                json!({
+                    "mode": "stateless",
+                    "command": tool_call.args.get("command").and_then(|value| value.as_str()),
+                    "cwd": metadata.get("cwd"),
+                    "exit_code": metadata.get("exit_code"),
+                    "timed_out": timed_out,
+                    "truncated": metadata.get("truncated"),
+                }),
+            ));
+        }
+        "shell.session.open" => events.push((
+            EventType::ShellSessionOpened,
+            metadata.clone(),
+        )),
+        "shell.session.read" => {
+            if let Some(chunks) = metadata.get("chunks").and_then(|value| value.as_array()) {
+                if !chunks.is_empty() {
+                    events.push((
+                        EventType::ShellOutputAppended,
+                        json!({
+                            "session_id": metadata.get("session_id"),
+                            "seq": metadata.get("seq"),
+                            "chunk_count": chunks.len(),
+                            "chunks": chunks,
+                        }),
+                    ));
+                }
+            }
+            if let Some(completed_exec) = metadata.get("completed_exec") {
+                let event_type = match completed_exec
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                {
+                    Some("interrupted") => EventType::ShellExecutionInterrupted,
+                    Some("failed") | Some("timed_out") => EventType::ShellExecutionFailed,
+                    _ => EventType::ShellExecutionCompleted,
+                };
+                events.push((event_type, completed_exec.clone()));
+            }
+        }
+        "shell.session.close" => events.push((
+            EventType::ShellSessionClosed,
+            metadata.clone(),
+        )),
+        "shell.session.interrupt" => {
+            if metadata
+                .get("signaled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                events.push((EventType::ShellExecutionInterrupted, metadata.clone()));
+            }
+        }
+        "shell.session.resize" => {
+            if metadata
+                .get("resized")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            {
+                events.push((EventType::ShellSessionResized, metadata.clone()));
+            }
+        }
+        _ => {}
+    }
+    events
+}
+
+fn shell_tool_failure_event(tool_call: &ToolCall, error: &str) -> Option<(EventType, Value)> {
+    match tool_call.tool_name.as_str() {
+        "shell.exec" | "shell.session.exec" => Some((
+            EventType::ShellExecutionFailed,
+            json!({
+                "tool_name": tool_call.tool_name,
+                "command": tool_call.args.get("command").and_then(|value| value.as_str()),
+                "session_id": tool_call.args.get("session_id").and_then(|value| value.as_str()),
+                "error": error,
+            }),
+        )),
+        _ => None,
     }
 }
 

@@ -68,6 +68,15 @@ AgentJax 至少需要以下标准事件：
 - `turn_failed`
 - `model_response_received`
 - `tool_failed`
+- `sleep_requested`
+- `task_waiting`
+- `task_resumed`
+- `shell_session_opened`
+- `shell_session_closed`
+- `shell_execution_started`
+- `shell_output_appended`
+- `shell_execution_completed`
+- `shell_execution_interrupted`
 - `task_checkpointed`
 - `task_cancelled`
 - `summary_invalidated`
@@ -165,6 +174,21 @@ pub enum TurnPhase {
 对于 `headless_task`，没有 `message_received` 也可以进入 turn：
 - 由 `task_started` / `schedule_triggered` / `dependency_complete` 驱动
 - turn 依然作为处理单元存在
+
+### 4.6 Shell Session 与 Turn 的关系
+需要明确一个运行时边界：
+- `shell.exec` 更接近普通一次性 tool call
+- `shell.session.*` 更接近可跨 turn 持续存在的 runtime resource
+
+这意味着：
+- 一个 turn 可以创建 shell session
+- 后续 turn 可以继续在同一个 `session_id` 上执行
+- shell session 的生命周期不必严格等于单个 turn 生命周期
+
+多会话并发的推荐方式是：
+- 多个独立 `session_id`
+
+而不是第一阶段就在单 shell 内支持复杂 job control。
 ---
 ## 5. Task Runtime 协议
 ### 5.1 Task 是什么
@@ -205,8 +229,10 @@ pub enum TaskPhase {
 2. `task_started`
 3. 生成 `turn_started` 或直接进入 headless execution
 4. 运行中产生 `model_called` / `tool_called` / `artifact_created`
-5. 可能产生 `task_checkpointed`
-6. 最终 `task_succeeded` 或 `task_failed`
+5. 如进入等待，可产生 `sleep_requested` / `task_waiting`
+6. 恢复后可产生 `task_resumed`
+7. 可能产生 `task_checkpointed`
+8. 最终 `task_succeeded` 或 `task_failed`
 ---
 ## 6. Scheduled Task 进入 Runtime 的方式
 ### 6.1 调度对象统一为 Scheduled Task

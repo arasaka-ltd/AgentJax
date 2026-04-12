@@ -19,6 +19,7 @@ dependencies = [
  "crossterm",
  "futures-util",
  "image",
+ "libc",
  "ratatui",
  "reqwest 0.12.28",
  "rig-core",

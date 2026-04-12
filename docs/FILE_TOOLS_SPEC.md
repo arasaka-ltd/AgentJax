@@ -35,6 +35,9 @@ Agent 不应被迫依赖 `shell` 才能完成常见文件操作。
 
 `shell` 可以保留，但不应成为默认文件操作入口。
 
+关于 shell execution 的正式协议，见：
+- `docs/SHELL_TOOL_SPEC.md`
+
 ### 3.2 `read` / `edit` / `write` 必须语义分离
 - `read` 只负责读取
 - `edit` 只负责修改已有文本文件

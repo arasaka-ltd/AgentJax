@@ -120,6 +120,23 @@ AgentJax 当前的正式架构规范由以下文档组成。
   - AgentJax 应负责的 daemon / workspace / plugin runtime / task runtime / context engine / policy 层
   - 禁止重复实现的基础层
   - retrieval / file tools / plugin manager 对 Rig 的对齐原则
+### Spec 6.4：Shell Tool
+- `docs/SHELL_TOOL_SPEC.md`
+- 作用：定义 Agent-facing shell execution tool surface
+- 包括：
+  - `shell.exec` 与 `shell.session.*` 的语义分离
+  - 无状态单次命令执行
+  - 有状态 shell session
+  - 多会话并发与 session 选择
+  - shell-specific event / lifecycle / governance 边界
+### Spec 6.5：Runtime Control Tool
+- `docs/RUNTIME_CONTROL_TOOL_SPEC.md`
+- 作用：定义 Agent-facing runtime control tools
+- 包括：
+  - `sleep` 作为 runtime suspension primitive
+  - waiting / wake / resume 语义
+  - 与 tool loop、headless task、shell session 的关系
+  - wait control 的 event / governance 边界
 ### Plan A：`src/plugins` Refactor
 - `docs/PLUGIN_REFACTOR_PLAN.md`
 - 作用：治理 builtin runtime 与真实插件系统的边界
