@@ -185,19 +185,22 @@ impl ShellSessionState {
         }
         self.last_exit_code = Some(exit_code);
         self.cwd = cwd;
-        let mut completed = self.active_execution.take().unwrap_or(ShellExecutionRecord {
-            exec_id: exec_id.to_string(),
-            session_id: Some(self.session_id.clone()),
-            mode: ShellExecutionMode::SessionBound,
-            command: String::new(),
-            status: ShellExecutionStatus::Completed,
-            exit_code: Some(exit_code),
-            started_at: Utc::now(),
-            finished_at: None,
-            timed_out: false,
-            interrupted: false,
-            detached: false,
-        });
+        let mut completed = self
+            .active_execution
+            .take()
+            .unwrap_or(ShellExecutionRecord {
+                exec_id: exec_id.to_string(),
+                session_id: Some(self.session_id.clone()),
+                mode: ShellExecutionMode::SessionBound,
+                command: String::new(),
+                status: ShellExecutionStatus::Completed,
+                exit_code: Some(exit_code),
+                started_at: Utc::now(),
+                finished_at: None,
+                timed_out: false,
+                interrupted: false,
+                detached: false,
+            });
         completed.exit_code = Some(exit_code);
         completed.finished_at = Some(Utc::now());
         completed.status = if completed.interrupted {
@@ -425,18 +428,22 @@ impl ShellSessionManager {
         spawn_output_pump(stdout, Arc::clone(&state), "stdout");
         spawn_output_pump(stderr, Arc::clone(&state), "stderr");
 
-        self.sessions.lock().expect("shell sessions lock poisoned").insert(
-            session_id.clone(),
-            ShellSessionHandle {
-                state: Arc::clone(&state),
-                child,
-                process_group_id,
-                pty,
-            },
-        );
+        self.sessions
+            .lock()
+            .expect("shell sessions lock poisoned")
+            .insert(
+                session_id.clone(),
+                ShellSessionHandle {
+                    state: Arc::clone(&state),
+                    child,
+                    process_group_id,
+                    pty,
+                },
+            );
 
         if pty {
-            self.apply_resize_command(&session_id, columns, rows).await?;
+            self.apply_resize_command(&session_id, columns, rows)
+                .await?;
         }
 
         Ok(json!({
@@ -461,10 +468,7 @@ impl ShellSessionManager {
         let (state, child) = self.session_refs(session_id)?;
         self.refresh_session_process(&state, &child).await?;
 
-        let exec_id = format!(
-            "shexec_{}",
-            SHELL_EXEC_SEQ.fetch_add(1, Ordering::Relaxed)
-        );
+        let exec_id = format!("shexec_{}", SHELL_EXEC_SEQ.fetch_add(1, Ordering::Relaxed));
         {
             let mut locked = state.lock().expect("shell session state lock poisoned");
             if locked.status == ShellSessionStatus::Closed {
@@ -613,7 +617,10 @@ impl ShellSessionManager {
         };
 
         let running = {
-            let state = handle.state.lock().expect("shell session state lock poisoned");
+            let state = handle
+                .state
+                .lock()
+                .expect("shell session state lock poisoned");
             state.status == ShellSessionStatus::Running
         };
         if running && !force {
@@ -632,7 +639,10 @@ impl ShellSessionManager {
         let _ = child.wait().await;
         drop(child);
 
-        let mut state = handle.state.lock().expect("shell session state lock poisoned");
+        let mut state = handle
+            .state
+            .lock()
+            .expect("shell session state lock poisoned");
         state.status = ShellSessionStatus::Closed;
         state.active_exec_id = None;
         state.updated_at = Utc::now();
@@ -788,11 +798,8 @@ impl ShellSessionManager {
     }
 }
 
-fn spawn_output_pump<T>(
-    stream: T,
-    state: Arc<Mutex<ShellSessionState>>,
-    stream_name: &'static str,
-) where
+fn spawn_output_pump<T>(stream: T, state: Arc<Mutex<ShellSessionState>>, stream_name: &'static str)
+where
     T: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
@@ -805,7 +812,8 @@ fn spawn_output_pump<T>(
                 Err(error) => {
                     let mut locked = state.lock().expect("shell session state lock poisoned");
                     locked.status = ShellSessionStatus::Failed;
-                    locked.append_chunk(stream_name, format!("shell stream read failed: {error}\n"));
+                    locked
+                        .append_chunk(stream_name, format!("shell stream read failed: {error}\n"));
                     break;
                 }
             };
@@ -1029,8 +1037,8 @@ impl ToolPlugin for ShellExecToolPlugin {
             description: "Run a one-shot shell command without preserving context.".into(),
             when_to_use: "Use for a single command such as pwd, ls, git status, or cargo check."
                 .into(),
-            when_not_to_use:
-                "Do not use when later commands must reuse cd/export/source state.".into(),
+            when_not_to_use: "Do not use when later commands must reuse cd/export/source state."
+                .into(),
             arguments_schema: json!({
                 "type": "object",
                 "properties": {
@@ -1239,8 +1247,8 @@ impl ToolPlugin for ShellSessionInterruptToolPlugin {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "shell.session.interrupt".into(),
-            description: "Send SIGINT or terminal interrupt to the active command in a shell session."
-                .into(),
+            description:
+                "Send SIGINT or terminal interrupt to the active command in a shell session.".into(),
             when_to_use: "Use when a session command is stuck or needs Ctrl-C.".into(),
             when_not_to_use: "Do not use when the session has no active execution.".into(),
             arguments_schema: json!({

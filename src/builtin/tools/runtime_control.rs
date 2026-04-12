@@ -96,7 +96,10 @@ fn resolve_wake_at(call: &ToolCall) -> Result<(DateTime<Utc>, i64)> {
         bail!("sleep requires args.duration_ms, args.duration_secs, or args.until");
     };
     validate_sleep_duration(duration_ms)?;
-    Ok((Utc::now() + Duration::milliseconds(duration_ms), duration_ms))
+    Ok((
+        Utc::now() + Duration::milliseconds(duration_ms),
+        duration_ms,
+    ))
 }
 
 fn validate_sleep_duration(duration_ms: i64) -> Result<()> {

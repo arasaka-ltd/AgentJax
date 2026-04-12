@@ -33,6 +33,11 @@
 特别是工具这件事：
 **如果工具没有进入明确的提示词协议，Agent 事实上就“不知道自己能用工具”。**
 
+但也必须明确另一条边界：
+**Prompt 负责暴露工具认知，不负责定义文本式 tool-calling 协议。**
+结构化 tool calling 与 tool loop 正式协议，见：
+- `docs/STRUCTURED_TOOL_CALLING_SPEC.md`
+
 ---
 ## 4. 三层模型
 ### 4.1 Source Layer

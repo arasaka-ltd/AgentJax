@@ -141,7 +141,7 @@ pub enum EventSource {
 2. turn started
 3. context build
 4. model request
-5. tool loop（0..n）
+5. structured tool loop（0..n）
 6. output finalize
 7. memory commit
 8. turn complete
@@ -166,7 +166,7 @@ pub enum TurnPhase {
 2. `turn_started`
 3. `context_built`
 4. `model_called`
-5. `tool_called` / `tool_completed`（可重复）
+5. `tool_call_requested` / `tool_called` / `tool_completed`（可重复）
 6. `artifact_created`（可选）
 7. `memory_committed`（可选）
 8. `turn_succeeded` 或 `turn_failed`

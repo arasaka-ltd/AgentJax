@@ -13,9 +13,10 @@ use crate::{
     },
     core::{BillingPlugin, Plugin, PluginContext, ProviderPlugin, ResourceProviderPlugin},
     domain::{
-        BillingBreakdownItem, BillingCapability, BillingConfidence, BillingMode, BillingRecord,
-        Permission, PluginCapability, PluginManifest, ProviderCapability, Resource,
-        ResourceDescriptor, ResourceId, ResourceKind, ResourceStatus, UsageCategory, UsageRecord,
+        AssistantTextItem, BillingBreakdownItem, BillingCapability, BillingConfidence, BillingMode,
+        BillingRecord, FinishReason, ModelOutputItem, ModelTurnOutput, ModelUsage, Permission,
+        PluginCapability, PluginManifest, ProviderCapability, Resource, ResourceDescriptor,
+        ResourceId, ResourceKind, ResourceStatus, ToolCallItem, UsageCategory, UsageRecord,
     },
 };
 
@@ -44,15 +45,44 @@ struct OpenAiModelsResponse {
 #[derive(Debug, Deserialize)]
 struct OpenAiResponsesApiResponse {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    usage: Option<OpenAiResponseUsage>,
+    #[serde(default)]
     output_text: Option<String>,
     #[serde(default)]
     output: Vec<OpenAiResponsesOutputItem>,
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenAiResponsesOutputItem {
+struct OpenAiResponseUsage {
     #[serde(default)]
-    content: Vec<OpenAiResponsesContentItem>,
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum OpenAiResponsesOutputItem {
+    #[serde(rename = "message")]
+    Message {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        content: Vec<OpenAiResponsesContentItem>,
+    },
+    #[serde(rename = "function_call")]
+    FunctionCall {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        call_id: Option<String>,
+        name: String,
+        arguments: String,
+    },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,7 +229,11 @@ impl OpenAiProviderAdapter {
         }
     }
 
-    pub async fn prompt_text(&self, agent: &AgentDefinition, prompt: &str) -> Result<String> {
+    pub async fn prompt_turn(
+        &self,
+        agent: &AgentDefinition,
+        prompt: &str,
+    ) -> Result<ModelTurnOutput> {
         let client = reqwest::Client::builder().build()?;
         let response = client
             .post(self.config.endpoint_url("responses"))
@@ -214,7 +248,11 @@ impl OpenAiProviderAdapter {
         }
 
         let payload: OpenAiResponsesApiResponse = response.json().await?;
-        extract_output_text(payload)
+        normalize_model_turn_output(payload)
+    }
+
+    pub async fn prompt_text(&self, agent: &AgentDefinition, prompt: &str) -> Result<String> {
+        Ok(self.prompt_turn(agent, prompt).await?.assistant_text())
     }
 
     fn request_headers(&self) -> Result<ReqwestHeaderMap> {
@@ -254,25 +292,130 @@ impl OpenAiProviderAdapter {
     }
 }
 
-fn extract_output_text(payload: OpenAiResponsesApiResponse) -> Result<String> {
-    if let Some(output_text) = payload.output_text.filter(|text| !text.trim().is_empty()) {
-        return Ok(collapse_repeated_text(output_text));
+fn normalize_model_turn_output(payload: OpenAiResponsesApiResponse) -> Result<ModelTurnOutput> {
+    let mut items = Vec::new();
+
+    for (index, item) in payload.output.into_iter().enumerate() {
+        match item {
+            OpenAiResponsesOutputItem::Message { id, content } => {
+                let text = content
+                    .into_iter()
+                    .filter(|item| item.content_type == "output_text")
+                    .filter_map(|item| item.text)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if text.trim().is_empty() {
+                    continue;
+                }
+                items.extend(parse_text_fallback_items(
+                    &collapse_repeated_text(text),
+                    id.unwrap_or_else(|| format!("msg_{index}")),
+                )?);
+            }
+            OpenAiResponsesOutputItem::FunctionCall {
+                id,
+                call_id,
+                name,
+                arguments,
+            } => {
+                let args = serde_json::from_str(&arguments).unwrap_or_else(|_| {
+                    json!({
+                        "_raw_arguments": arguments,
+                    })
+                });
+                let item_id = id.unwrap_or_else(|| format!("fc_{index}"));
+                let tool_call_id = call_id.unwrap_or_else(|| item_id.clone());
+                items.push(ModelOutputItem::ToolCall(ToolCallItem {
+                    item_id,
+                    tool_call_id,
+                    tool_name: name,
+                    args,
+                    timeout_secs: None,
+                }));
+            }
+            OpenAiResponsesOutputItem::Unknown => {}
+        }
     }
 
-    let text = payload
-        .output
-        .into_iter()
-        .flat_map(|item| item.content.into_iter())
-        .filter(|item| item.content_type == "output_text")
-        .filter_map(|item| item.text)
-        .collect::<Vec<_>>()
-        .join("\n");
+    if items.is_empty() {
+        if let Some(text) = payload.output_text.filter(|text| !text.trim().is_empty()) {
+            items.extend(parse_text_fallback_items(
+                &collapse_repeated_text(text),
+                "out_text".into(),
+            )?);
+        }
+    }
 
-    if text.trim().is_empty() {
-        Err(anyhow!("openai prompt failed: empty response output"))
+    if items.is_empty() {
+        return Err(anyhow!("openai prompt failed: empty response output"));
+    }
+
+    let finish_reason = if items
+        .iter()
+        .any(|item| matches!(item, ModelOutputItem::ToolCall(_)))
+    {
+        FinishReason::ToolCalls
     } else {
-        Ok(collapse_repeated_text(text))
+        FinishReason::Completed
+    };
+
+    Ok(ModelTurnOutput {
+        output_id: payload.id.unwrap_or_else(|| "output.openai".into()),
+        items,
+        finish_reason,
+        usage: payload.usage.map(|usage| ModelUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+        }),
+    })
+}
+
+fn parse_text_fallback_items(text: &str, item_prefix: String) -> Result<Vec<ModelOutputItem>> {
+    let mut items = Vec::new();
+    let mut assistant_lines = Vec::new();
+
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            assistant_lines.push(String::new());
+            continue;
+        }
+
+        if let Some(payload) = trimmed.strip_prefix("TOOL_CALL ") {
+            let value: Value = serde_json::from_str(payload).map_err(|error| {
+                anyhow!("invalid compatibility tool call payload from model adapter: {error}")
+            })?;
+            let tool_name = value
+                .get("tool")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| anyhow!("compatibility tool call missing tool"))?;
+            let args = value.get("args").cloned().unwrap_or_else(|| json!({}));
+            let timeout_secs = value.get("timeout_secs").and_then(|value| value.as_u64());
+            items.push(ModelOutputItem::ToolCall(ToolCallItem {
+                item_id: format!("{item_prefix}_tool_{index}"),
+                tool_call_id: format!("{item_prefix}_call_{index}_{tool_name}"),
+                tool_name: tool_name.into(),
+                args,
+                timeout_secs,
+            }));
+        } else {
+            assistant_lines.push(line.to_string());
+        }
     }
+
+    let assistant_text = assistant_lines.join("\n").trim().to_string();
+    if !assistant_text.is_empty() {
+        items.insert(
+            0,
+            ModelOutputItem::AssistantText(AssistantTextItem {
+                item_id: format!("{item_prefix}_text"),
+                text: assistant_text,
+                is_partial: false,
+            }),
+        );
+    }
+
+    Ok(items)
 }
 
 fn collapse_repeated_text(text: String) -> String {
@@ -361,9 +504,9 @@ impl ProviderPlugin for OpenAiProviderPlugin {
         &self.config.provider_id
     }
 
-    async fn prompt_text(&self, agent: &AgentDefinition, prompt: &str) -> Result<String> {
+    async fn prompt_turn(&self, agent: &AgentDefinition, prompt: &str) -> Result<ModelTurnOutput> {
         OpenAiProviderAdapter::new(self.config.clone())
-            .prompt_text(agent, prompt)
+            .prompt_turn(agent, prompt)
             .await
     }
 }
@@ -497,10 +640,14 @@ mod tests {
     };
 
     use super::{
-        collapse_repeated_text, normalize_model_info, OpenAiProviderAdapter, OpenAiProviderConfig,
-        OpenAiRawModel,
+        collapse_repeated_text, normalize_model_info, normalize_model_turn_output,
+        OpenAiProviderAdapter, OpenAiProviderConfig, OpenAiRawModel, OpenAiResponsesApiResponse,
+        OpenAiResponsesContentItem, OpenAiResponsesOutputItem,
     };
-    use crate::config::AgentDefinition;
+    use crate::{
+        config::AgentDefinition,
+        domain::{ModelOutputItem, ToolCallItem},
+    };
 
     #[tokio::test]
     async fn lists_models_and_normalizes_language_models_from_base_url() {
@@ -597,6 +744,35 @@ mod tests {
             collapse_repeated_text("你好世界你好世界".into()),
             "你好世界"
         );
+    }
+
+    #[test]
+    fn normalizes_text_fallback_tool_calls_into_structured_items() {
+        let output = normalize_model_turn_output(OpenAiResponsesApiResponse {
+            id: Some("resp_1".into()),
+            usage: None,
+            output_text: None,
+            output: vec![OpenAiResponsesOutputItem::Message {
+                id: Some("msg_1".into()),
+                content: vec![OpenAiResponsesContentItem {
+                    content_type: "output_text".into(),
+                    text: Some(
+                        "TOOL_CALL {\"tool\":\"read\",\"args\":{\"path\":\"Cargo.toml\"}}\nTOOL_CALL {\"tool\":\"memory.search\",\"args\":{\"query\":\"defaults\"}}".into(),
+                    ),
+                }],
+            }],
+        })
+        .unwrap();
+
+        assert_eq!(output.items.len(), 2);
+        assert!(matches!(
+            output.items[0],
+            ModelOutputItem::ToolCall(ToolCallItem { .. })
+        ));
+        assert!(matches!(
+            output.items[1],
+            ModelOutputItem::ToolCall(ToolCallItem { .. })
+        ));
     }
 
     async fn spawn_server(

@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 
 use crate::config::{AgentDefinition, RuntimeConfig};
 use crate::core::{PluginHost, WorkspaceRuntimeHost};
+use crate::domain::ModelTurnOutput;
 
 #[derive(Clone)]
 pub struct ApplicationRuntime {
@@ -47,6 +48,10 @@ impl ApplicationRuntime {
     }
 
     pub async fn prompt_text(&self, request: AgentPromptRequest) -> Result<String> {
+        Ok(self.prompt_turn(request).await?.assistant_text())
+    }
+
+    pub async fn prompt_turn(&self, request: AgentPromptRequest) -> Result<ModelTurnOutput> {
         if let Some(agent) = request.agent_override.as_ref() {
             self.validate_agent_binding(agent)?;
         }
@@ -55,7 +60,7 @@ impl ApplicationRuntime {
             None => self.resolve_agent(request.agent_id.as_deref())?,
         };
         self.resolve_provider(&agent.provider_id)?
-            .prompt_text(agent, &request.prompt)
+            .prompt_turn(agent, &request.prompt)
             .await
     }
 

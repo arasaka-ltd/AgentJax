@@ -3,6 +3,7 @@ pub mod artifact;
 pub mod billing;
 pub mod context;
 pub mod event;
+pub mod model_output;
 pub mod node;
 pub mod object_meta;
 pub mod plugin;
@@ -24,6 +25,10 @@ pub use context::{
     Confidence, ContextBlock, ContextBlockKind, ContextProjection, ContextSource, Freshness,
 };
 pub use event::{EventRecord, EventSource, EventType, RuntimeEvent};
+pub use model_output::{
+    AssistantTextItem, FinishReason, ModelOutputItem, ModelTurnOutput, ModelUsage,
+    RuntimeControlItem, SleepRequest, ToolCallItem, ToolResultItem,
+};
 pub use node::{Node, NodeKind, NodeStatus, TrustLevel};
 pub use object_meta::ObjectMeta;
 pub use plugin::{

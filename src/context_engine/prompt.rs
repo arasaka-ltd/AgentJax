@@ -314,9 +314,9 @@ fn render_knowledge(xml: &mut String, blocks: &[ContextBlock]) {
 fn render_tools(xml: &mut String, tools: &[ToolDescriptor], allow_tool_calls: bool) {
     xml.push_str("  <tools>\n");
     if allow_tool_calls {
-        xml.push_str("    <tool_call_protocol mode=\"agentjax.v0.compat\">");
+        xml.push_str("    <tool_call_protocol mode=\"agentjax.v1.structured\">");
         xml.push_str(
-            "If a tool is required, reply with exactly one line: TOOL_CALL {\"tool\":\"name\",\"args\":{...},\"timeout_secs\":optional}. Reply with nothing else.",
+            "Use tools through the runtime's structured tool-calling protocol when needed. Prefer structured tool requests over describing tool use in prose. Compatibility text fallback may be supported by the provider adapter during migration.",
         );
         xml.push_str("</tool_call_protocol>\n");
     }

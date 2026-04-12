@@ -137,6 +137,14 @@ AgentJax 当前的正式架构规范由以下文档组成。
   - waiting / wake / resume 语义
   - 与 tool loop、headless task、shell session 的关系
   - wait control 的 event / governance 边界
+### Spec 6.6：Structured Tool Calling
+- `docs/STRUCTURED_TOOL_CALLING_SPEC.md`
+- 作用：定义结构化 tool calling 与正式 tool loop 协议
+- 包括：
+  - 从文本式 `TOOL_CALL` 协议迁移到结构化 item 协议
+  - `tool calling loop (0..n)` 的运行时状态机
+  - tool result 的结构化回写
+  - semantic streaming 与 token streaming 的边界
 ### Plan A：`src/plugins` Refactor
 - `docs/PLUGIN_REFACTOR_PLAN.md`
 - 作用：治理 builtin runtime 与真实插件系统的边界

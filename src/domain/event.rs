@@ -29,6 +29,7 @@ pub enum EventType {
     ContextBuilt,
     ModelCalled,
     ModelResponseReceived,
+    ToolCallRequested,
     ToolCalled,
     ToolCompleted,
     ToolFailed,

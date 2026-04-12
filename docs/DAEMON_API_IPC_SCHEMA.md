@@ -201,6 +201,17 @@ daemon 返回：
 - `seq`: 流内序号
 - `data`: 流负载
 
+必须明确：
+- `stream` 不等于“纯文本 token 流”
+- `stream.event` 可以承载结构化语义事件
+
+例如未来可用于：
+- `assistant.text.delta`
+- `tool_call.started`
+- `tool_call.completed`
+- `runtime.waiting`
+- `task.resumed`
+
 ### 4.6 Error Envelope
 `error` envelope 只用于：
 - 握手失败

@@ -770,12 +770,23 @@ mod tests {
             "provider.test"
         }
 
-        async fn prompt_text(
+        async fn prompt_turn(
             &self,
             _agent: &crate::config::AgentDefinition,
             _prompt: &str,
-        ) -> anyhow::Result<String> {
-            Ok("ok".into())
+        ) -> anyhow::Result<crate::domain::ModelTurnOutput> {
+            Ok(crate::domain::ModelTurnOutput {
+                output_id: "out_test".into(),
+                items: vec![crate::domain::ModelOutputItem::AssistantText(
+                    crate::domain::AssistantTextItem {
+                        item_id: "item_text".into(),
+                        text: "ok".into(),
+                        is_partial: false,
+                    },
+                )],
+                finish_reason: crate::domain::FinishReason::Completed,
+                usage: None,
+            })
         }
     }
 

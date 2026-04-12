@@ -36,9 +36,10 @@ use crate::{
     core::AgentPromptRequest,
     daemon::store::DaemonStore,
     domain::{
-        Agent, AgentStatus, AutonomyPolicy, ContextAssemblyPurpose, EventType, ExecutionMode, Node,
-        NodeKind, NodeStatus, ObjectMeta, PluginDescriptor, PluginStatus, Schedule, Session,
-        SessionModelTarget, Task, TaskStatus, ToolCall, ToolCaller, TrustLevel,
+        Agent, AgentStatus, AutonomyPolicy, ContextAssemblyPurpose, EventType, ExecutionMode,
+        ModelOutputItem, ModelTurnOutput, Node, NodeKind, NodeStatus, ObjectMeta, PluginDescriptor,
+        PluginStatus, Schedule, Session, SessionModelTarget, Task, TaskStatus, ToolCall,
+        ToolCallItem, ToolCaller, ToolResultItem, TrustLevel,
     },
 };
 
@@ -1813,11 +1814,7 @@ impl Daemon {
         Ok(())
     }
 
-    fn record_shell_tool_failure(
-        &self,
-        tool_call: &ToolCall,
-        error: &str,
-    ) -> Result<(), ApiError> {
+    fn record_shell_tool_failure(&self, tool_call: &ToolCall, error: &str) -> Result<(), ApiError> {
         let Some((event_type, payload)) = shell_tool_failure_event(tool_call, error) else {
             return Ok(());
         };
@@ -1891,11 +1888,13 @@ impl Daemon {
         if record.task.status != TaskStatus::Waiting {
             return Ok(());
         }
-        let session_id = record
-            .task
-            .session_id
-            .clone()
-            .ok_or_else(|| ApiError::new(ApiErrorCode::InternalError, "waiting task missing session_id", false))?;
+        let session_id = record.task.session_id.clone().ok_or_else(|| {
+            ApiError::new(
+                ApiErrorCode::InternalError,
+                "waiting task missing session_id",
+                false,
+            )
+        })?;
         let session_record = self
             .store
             .get_session(&session_id)
@@ -2177,10 +2176,7 @@ fn shell_tool_result_events(tool_call: &ToolCall, metadata: &Value) -> Vec<(Even
                 }),
             ));
         }
-        "shell.session.open" => events.push((
-            EventType::ShellSessionOpened,
-            metadata.clone(),
-        )),
+        "shell.session.open" => events.push((EventType::ShellSessionOpened, metadata.clone())),
         "shell.session.read" => {
             if let Some(chunks) = metadata.get("chunks").and_then(|value| value.as_array()) {
                 if !chunks.is_empty() {
@@ -2207,10 +2203,7 @@ fn shell_tool_result_events(tool_call: &ToolCall, metadata: &Value) -> Vec<(Even
                 events.push((event_type, completed_exec.clone()));
             }
         }
-        "shell.session.close" => events.push((
-            EventType::ShellSessionClosed,
-            metadata.clone(),
-        )),
+        "shell.session.close" => events.push((EventType::ShellSessionClosed, metadata.clone())),
         "shell.session.interrupt" => {
             if metadata
                 .get("signaled")
@@ -2340,23 +2333,29 @@ fn build_tool_followup_prompt(
 fn append_tool_result_messages(
     app: &Application,
     conversation_messages: &mut Vec<SessionMessage>,
-    tool_call: &ToolCall,
-    tool_result: &str,
+    tool_result: &ToolResultItem,
     session: &Session,
     next_message_id: String,
-) {
+) -> Result<(), ApiError> {
+    let tool_result_content = serde_json::to_string(tool_result).map_err(|error| {
+        ApiError::new(
+            ApiErrorCode::InternalError,
+            format!("failed to serialize tool result item: {error}"),
+            false,
+        )
+    })?;
     let mut tool_result_message = finalize_message(
-        SessionMessage::tool_result(tool_result),
+        SessionMessage::tool_result(tool_result_content),
         session,
         next_message_id.clone(),
         Some(vec![
             SessionMessageAnnotation {
                 kind: "tool_name".into(),
-                value: tool_call.tool_name.clone(),
+                value: tool_result.tool_name.clone(),
             },
             SessionMessageAnnotation {
                 kind: "tool_call_id".into(),
-                value: tool_call.tool_call_id.clone(),
+                value: tool_result.tool_call_id.clone(),
             },
         ]),
     );
@@ -2373,6 +2372,30 @@ fn append_tool_result_messages(
             value: "after_tool".into(),
         }]),
     ));
+    Ok(())
+}
+
+fn append_assistant_context_message(
+    app: &Application,
+    conversation_messages: &mut Vec<SessionMessage>,
+    text: &str,
+    session: &Session,
+    next_message_id: String,
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let mut assistant_message = finalize_message(
+        SessionMessage::assistant(text),
+        session,
+        next_message_id,
+        Some(vec![SessionMessageAnnotation {
+            kind: "phase".into(),
+            value: "pre_tool".into(),
+        }]),
+    );
+    assistant_message.meta.actor_id = Some(app.runtime.default_agent().agent_id.clone());
+    conversation_messages.push(assistant_message);
 }
 
 enum ToolLoopOutcome {
@@ -2413,12 +2436,15 @@ impl Daemon {
                     "iteration": iteration,
                 }),
             )?;
-            let prompt =
-                build_tool_followup_prompt(&self.app, assembled_context, conversation_messages.clone());
+            let prompt = build_tool_followup_prompt(
+                &self.app,
+                assembled_context,
+                conversation_messages.clone(),
+            );
             let response = self
                 .app
                 .runtime
-                .prompt_text(AgentPromptRequest {
+                .prompt_turn(AgentPromptRequest {
                     prompt,
                     agent_id: Some(self.app.runtime.default_agent().agent_id.clone()),
                     agent_override: Some(session_agent.clone()),
@@ -2437,38 +2463,71 @@ impl Daemon {
                 Some(task_id),
                 EventType::ModelResponseReceived,
                 json!({
-                    "message": response,
+                    "output_id": response.output_id,
+                    "items": response.items,
+                    "finish_reason": response.finish_reason,
+                    "usage": response.usage,
                     "iteration": iteration,
                 }),
             )?;
 
-            let Some(tool_call) =
-                parse_tool_call(&response, session_id, task_id, turn_id, &session_agent.agent_id)?
-            else {
-                return Ok(ToolLoopOutcome::Final(response));
-            };
+            let assistant_text = response.assistant_text();
+            let tool_calls = collect_tool_calls(
+                &response,
+                session_id,
+                task_id,
+                turn_id,
+                &session_agent.agent_id,
+            );
 
-            let tool_result = self.execute_tool_call(&tool_call).await?;
-            if let Some(sleep) = parse_sleep_directive(&tool_call, &tool_result)? {
-                self.apply_sleep_directive(session_id, task_id, turn_id, sleep.clone())
-                    .await?;
-                return Ok(ToolLoopOutcome::Sleeping(format!(
-                    "Runtime scheduled resume at {}. {}",
-                    sleep.wake_at.to_rfc3339(),
-                    sleep
-                        .resume_hint
-                        .unwrap_or_else(|| "The task is now waiting.".into())
-                )));
+            if tool_calls.is_empty() {
+                return Ok(ToolLoopOutcome::Final(assistant_text));
             }
 
-            append_tool_result_messages(
+            append_assistant_context_message(
                 &self.app,
                 &mut conversation_messages,
-                &tool_call,
-                &tool_result,
+                &assistant_text,
                 session,
                 self.store.next_message_id(),
             );
+
+            for tool_call in tool_calls {
+                self.record_event(
+                    session_id,
+                    turn_id,
+                    Some(task_id),
+                    EventType::ToolCallRequested,
+                    json!({
+                        "tool_call_id": tool_call.tool_call_id,
+                        "tool_name": tool_call.tool_name,
+                        "args": tool_call.args,
+                        "timeout_secs": tool_call.timeout_secs,
+                        "iteration": iteration,
+                    }),
+                )?;
+                let tool_result =
+                    execute_tool_call_item(&self.execute_tool_call(&tool_call).await?, &tool_call);
+                if let Some(sleep) = parse_sleep_directive(&tool_call, &tool_result)? {
+                    self.apply_sleep_directive(session_id, task_id, turn_id, sleep.clone())
+                        .await?;
+                    return Ok(ToolLoopOutcome::Sleeping(format!(
+                        "Runtime scheduled resume at {}. {}",
+                        sleep.wake_at.to_rfc3339(),
+                        sleep
+                            .resume_hint
+                            .unwrap_or_else(|| "The task is now waiting.".into())
+                    )));
+                }
+
+                append_tool_result_messages(
+                    &self.app,
+                    &mut conversation_messages,
+                    &tool_result,
+                    session,
+                    self.store.next_message_id(),
+                )?;
+            }
         }
 
         Err(ApiError::new(
@@ -2569,12 +2628,12 @@ impl Daemon {
 
 fn parse_sleep_directive(
     tool_call: &ToolCall,
-    tool_result: &str,
+    tool_result: &ToolResultItem,
 ) -> Result<Option<SleepDirective>, ApiError> {
     if tool_call.tool_name != "sleep" {
         return Ok(None);
     }
-    let value: Value = serde_json::from_str(tool_result).map_err(|error| {
+    let value: Value = serde_json::from_str(&tool_result.content).map_err(|error| {
         ApiError::new(
             ApiErrorCode::InternalError,
             format!("invalid sleep tool output: {error}"),
@@ -2602,13 +2661,68 @@ fn parse_sleep_directive(
         .with_timezone(&Utc);
     Ok(Some(SleepDirective {
         wake_at,
-        reason: value.get("reason").and_then(|value| value.as_str()).map(str::to_string),
+        reason: value
+            .get("reason")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
         resume_hint: value
             .get("resume_hint")
             .and_then(|value| value.as_str())
             .map(str::to_string),
         duration_ms: value.get("duration_ms").and_then(|value| value.as_i64()),
     }))
+}
+
+fn collect_tool_calls(
+    output: &ModelTurnOutput,
+    session_id: &str,
+    task_id: &str,
+    turn_id: &str,
+    agent_id: &str,
+) -> Vec<ToolCall> {
+    output
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ModelOutputItem::ToolCall(tool_call) => Some(to_runtime_tool_call(
+                tool_call, session_id, task_id, turn_id, agent_id,
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+fn to_runtime_tool_call(
+    item: &ToolCallItem,
+    session_id: &str,
+    task_id: &str,
+    turn_id: &str,
+    agent_id: &str,
+) -> ToolCall {
+    ToolCall {
+        tool_call_id: item.tool_call_id.clone(),
+        tool_name: item.tool_name.clone(),
+        args: item.args.clone(),
+        requested_by: ToolCaller::Agent {
+            agent_id: agent_id.into(),
+        },
+        session_id: Some(session_id.into()),
+        task_id: Some(task_id.into()),
+        turn_id: Some(turn_id.into()),
+        idempotency_key: Some(format!("{turn_id}:{}", item.tool_call_id)),
+        timeout_secs: item.timeout_secs,
+    }
+}
+
+fn execute_tool_call_item(content: &str, tool_call: &ToolCall) -> ToolResultItem {
+    ToolResultItem {
+        item_id: format!("tool_result_{}", tool_call.tool_call_id),
+        tool_call_id: tool_call.tool_call_id.clone(),
+        tool_name: tool_call.tool_name.clone(),
+        content: content.to_string(),
+        metadata: json!({ "ok": true }),
+        is_error: false,
+    }
 }
 
 fn recent_prompt_messages(messages: &[SessionMessage], limit: usize) -> Vec<SessionMessage> {
@@ -2656,52 +2770,6 @@ fn finalize_message(
     message
 }
 
-fn parse_tool_call(
-    response: &str,
-    session_id: &str,
-    task_id: &str,
-    turn_id: &str,
-    agent_id: &str,
-) -> Result<Option<ToolCall>, ApiError> {
-    let trimmed = response.trim();
-    let Some(payload) = trimmed.strip_prefix("TOOL_CALL ") else {
-        return Ok(None);
-    };
-    let value: serde_json::Value = serde_json::from_str(payload).map_err(|error| {
-        ApiError::new(
-            ApiErrorCode::InvalidRequest,
-            format!("invalid tool call payload from model: {error}"),
-            false,
-        )
-    })?;
-    let tool_name = value
-        .get("tool")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| {
-            ApiError::new(
-                ApiErrorCode::InvalidRequest,
-                "tool call missing tool",
-                false,
-            )
-        })?;
-    let args = value.get("args").cloned().unwrap_or_else(|| json!({}));
-    let timeout_secs = value.get("timeout_secs").and_then(|value| value.as_u64());
-
-    Ok(Some(ToolCall {
-        tool_call_id: format!("toolcall_{turn_id}_{tool_name}"),
-        tool_name: tool_name.into(),
-        args,
-        requested_by: ToolCaller::Agent {
-            agent_id: agent_id.into(),
-        },
-        session_id: Some(session_id.into()),
-        task_id: Some(task_id.into()),
-        turn_id: Some(turn_id.into()),
-        idempotency_key: Some(format!("{turn_id}:{tool_name}")),
-        timeout_secs,
-    }))
-}
-
 fn build_stream_envelopes(stream_id: &str, turn_id: &str, content: &str) -> Vec<ServerEnvelope> {
     let mut followups = Vec::new();
     followups.push(ServerEnvelope::Stream(StreamEnvelope {
@@ -2713,13 +2781,14 @@ fn build_stream_envelopes(stream_id: &str, turn_id: &str, content: &str) -> Vec<
         meta: None,
     }));
 
-    for (index, chunk) in content.split_whitespace().enumerate() {
+    let text_chunks = chunk_stream_text(content);
+    for (index, chunk) in text_chunks.iter().enumerate() {
         followups.push(ServerEnvelope::Stream(StreamEnvelope {
             stream_id: stream_id.into(),
             phase: StreamPhase::Chunk,
             event: "token".into(),
             seq: index as u64 + 1,
-            data: json!({ "text": format!("{chunk} ") }),
+            data: json!({ "text": chunk }),
             meta: None,
         }));
     }
@@ -2728,11 +2797,41 @@ fn build_stream_envelopes(stream_id: &str, turn_id: &str, content: &str) -> Vec<
         stream_id: stream_id.into(),
         phase: StreamPhase::End,
         event: "session.output".into(),
-        seq: content.split_whitespace().count() as u64 + 1,
+        seq: text_chunks.len() as u64 + 1,
         data: json!({ "turn_id": turn_id, "done": true }),
         meta: None,
     }));
     followups
+}
+
+fn chunk_stream_text(content: &str) -> Vec<String> {
+    const CHUNK_CHARS: usize = 96;
+
+    if content.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chunks = Vec::new();
+
+    for segment in content.split_inclusive('\n') {
+        let mut buffer = String::new();
+        let mut count = 0usize;
+
+        for ch in segment.chars() {
+            buffer.push(ch);
+            count += 1;
+            if ch == '\n' || count >= CHUNK_CHARS {
+                chunks.push(std::mem::take(&mut buffer));
+                count = 0;
+            }
+        }
+
+        if !buffer.is_empty() {
+            chunks.push(buffer);
+        }
+    }
+
+    chunks
 }
 
 fn build_log_stream_envelopes(stream_id: &str, lines: &[String]) -> Vec<ServerEnvelope> {
@@ -2809,7 +2908,9 @@ mod tests {
         domain::{ExecutionMode, ObjectMeta, Schedule, Task, TaskStatus},
     };
 
-    use super::{Daemon, SleepDirective};
+    use super::{
+        build_stream_envelopes, chunk_stream_text, collect_tool_calls, Daemon, SleepDirective,
+    };
 
     #[tokio::test]
     async fn session_send_runs_tool_loop_and_records_tool_events() {
@@ -2924,6 +3025,64 @@ mod tests {
 
         server.1.abort();
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stream_chunking_preserves_newlines_and_content() {
+        let content = "line one\n- bullet a\n- bullet b\n\nparagraph two";
+        let chunks = chunk_stream_text(content);
+        assert!(chunks.iter().any(|chunk| chunk.contains('\n')));
+        assert_eq!(chunks.concat(), content);
+
+        let envelopes = build_stream_envelopes("stream_1", "turn_1", content);
+        let streamed = envelopes
+            .iter()
+            .filter_map(|envelope| match envelope {
+                crate::api::ServerEnvelope::Stream(stream)
+                    if matches!(stream.phase, crate::api::StreamPhase::Chunk) =>
+                {
+                    stream.data.get("text").and_then(|value| value.as_str())
+                }
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(streamed, content);
+    }
+
+    #[test]
+    fn collects_multiple_structured_tool_calls() {
+        let output = crate::domain::ModelTurnOutput {
+            output_id: "out_1".into(),
+            items: vec![
+                crate::domain::ModelOutputItem::ToolCall(crate::domain::ToolCallItem {
+                    item_id: "item_1".into(),
+                    tool_call_id: "call_1".into(),
+                    tool_name: "read".into(),
+                    args: serde_json::json!({ "path": "Cargo.toml" }),
+                    timeout_secs: Some(5),
+                }),
+                crate::domain::ModelOutputItem::ToolCall(crate::domain::ToolCallItem {
+                    item_id: "item_2".into(),
+                    tool_call_id: "call_2".into(),
+                    tool_name: "memory.search".into(),
+                    args: serde_json::json!({ "query": "defaults" }),
+                    timeout_secs: None,
+                }),
+            ],
+            finish_reason: crate::domain::FinishReason::ToolCalls,
+            usage: None,
+        };
+
+        let tool_calls = collect_tool_calls(
+            &output,
+            "session.default",
+            "task_1",
+            "turn_1",
+            "agent.default",
+        );
+        assert_eq!(tool_calls.len(), 2);
+        assert_eq!(tool_calls[0].tool_call_id, "call_1");
+        assert_eq!(tool_calls[1].tool_call_id, "call_2");
     }
 
     #[tokio::test]
@@ -3198,8 +3357,14 @@ mod tests {
         let task = daemon.store.get_task("task_sleep").unwrap().unwrap();
         assert_eq!(task.task.status, TaskStatus::Waiting);
         assert!(task.task.waiting_until.is_some());
-        assert_eq!(task.task.waiting_reason.as_deref(), Some("wait for shell output"));
-        assert_eq!(task.task.waiting_resume_hint.as_deref(), Some("check shell session"));
+        assert_eq!(
+            task.task.waiting_reason.as_deref(),
+            Some("wait for shell output")
+        );
+        assert_eq!(
+            task.task.waiting_resume_hint.as_deref(),
+            Some("check shell session")
+        );
     }
 
     #[tokio::test]
@@ -4052,7 +4217,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             for (expected_request_line, expected_substrings, body) in responses {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                let mut buffer = vec![0_u8; 16384];
+                let mut buffer = vec![0_u8; 65536];
                 let bytes = stream.read(&mut buffer).await.unwrap();
                 let request = String::from_utf8_lossy(&buffer[..bytes]);
                 assert!(request.contains(&expected_request_line), "{request}");

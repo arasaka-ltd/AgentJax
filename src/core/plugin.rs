@@ -9,7 +9,9 @@ use crate::core::{
     EventBus, EventStore, HookBus, PluginRegistry, ResourceRegistry, SessionStore,
     WorkspaceRuntimeHost,
 };
-use crate::domain::{BillingRecord, PluginCapability, PluginManifest, Resource, UsageRecord};
+use crate::domain::{
+    BillingRecord, ModelTurnOutput, PluginCapability, PluginManifest, Resource, UsageRecord,
+};
 
 #[derive(Clone)]
 pub struct WorkspaceHandle {
@@ -153,7 +155,11 @@ pub trait ResourceProviderPlugin: Plugin {
 pub trait ProviderPlugin: Plugin {
     fn provider_id(&self) -> &str;
 
-    async fn prompt_text(&self, agent: &AgentDefinition, prompt: &str) -> Result<String>;
+    async fn prompt_turn(&self, agent: &AgentDefinition, prompt: &str) -> Result<ModelTurnOutput>;
+
+    async fn prompt_text(&self, agent: &AgentDefinition, prompt: &str) -> Result<String> {
+        Ok(self.prompt_turn(agent, prompt).await?.assistant_text())
+    }
 }
 
 pub trait StoragePlugin: Plugin {
