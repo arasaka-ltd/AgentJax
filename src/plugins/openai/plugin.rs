@@ -968,3 +968,72 @@ fn normalize_model_info(model_id: &str) -> ModelInfoSnapshot {
         capability_tags,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::core::BillingPlugin;
+
+    #[tokio::test]
+    async fn estimate_billing_produces_breakdown_for_text_usage() {
+        let plugin = OpenAiProviderPlugin::new(OpenAiProviderConfig {
+            provider_id: "openai-default".into(),
+            api_key: Some("test-key".into()),
+            api_key_env: "OPENAI_API_KEY".into(),
+            base_url: None,
+            organization: None,
+            project: None,
+        });
+        let usage = UsageRecord {
+            usage_id: "usage_1".into(),
+            category: UsageCategory::ModelText,
+            provider_id: Some("openai-default".into()),
+            model_id: Some("gpt-4o-mini".into()),
+            resource_id: "resource.openai.responses".into(),
+            endpoint_id: Some("responses".into()),
+            region: None,
+            account_id: None,
+            project_id: None,
+            workspace_id: Some("workspace_1".into()),
+            agent_id: Some("agent_1".into()),
+            session_id: Some("session_1".into()),
+            task_id: Some("task_1".into()),
+            plugin_id: Some("provider.openai.openai-default".into()),
+            request_count: 1,
+            response_count: 1,
+            message_count: 2,
+            input_tokens: Some(2_000),
+            output_tokens: Some(1_000),
+            cached_tokens: None,
+            reasoning_tokens: None,
+            audio_seconds: None,
+            image_count: None,
+            video_count: None,
+            tool_call_count: None,
+            context_window_used: Some(3_000),
+            max_context_tier_crossed: None,
+            started_at: chrono::Utc::now(),
+            ended_at: chrono::Utc::now(),
+            latency_ms: 120,
+            retry_count: 0,
+        };
+
+        let billing = plugin
+            .estimate_billing(&usage)
+            .await
+            .expect("billing estimation failed")
+            .expect("expected billing estimate");
+
+        assert_eq!(billing.mode, BillingMode::Estimated);
+        assert_eq!(billing.currency, "USD");
+        assert_eq!(
+            billing.rule_id.as_deref(),
+            Some("openai.local.placeholder.v1")
+        );
+        assert_eq!(billing.breakdown.len(), 2);
+        assert_eq!(billing.breakdown[0].item_type, "input_tokens");
+        assert_eq!(billing.breakdown[1].item_type, "output_tokens");
+        assert_eq!(billing.amount, "0.00090000");
+    }
+}

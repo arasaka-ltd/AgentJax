@@ -21,6 +21,7 @@ use crate::{
         StreamEnvelope, StreamPhase,
     },
     cli::request,
+    surface::CoreSurface,
     transport::unix::UnixSocketClient,
 };
 
@@ -145,7 +146,7 @@ impl TuiApp {
             meta: Some(RequestMeta {
                 requester: Some(actor.clone()),
                 session_id: Some(self.session_id.clone()),
-                surface_id: Some("tui.local".into()),
+                surface_id: Some(CoreSurface::TuiLocal.id().into()),
                 ..RequestMeta::default()
             }),
         };

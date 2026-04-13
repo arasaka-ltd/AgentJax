@@ -159,3 +159,320 @@ impl Daemon {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde::de::DeserializeOwned;
+    use serde_json::json;
+
+    use crate::{
+        api::{
+            ApiMethod, LogsTailRequest, RequestEnvelope, RequestId, ScheduleCreateRequest,
+            ScheduleDeleteRequest, ScheduleGetResponse, ScheduleListResponse,
+            ScheduleUpdateRequest, SessionSendRequest, SessionSendResponse,
+            SessionSubscribeRequest, StreamCancelRequest, SubscriptionCancelRequest,
+            SubscriptionResponse, TaskListResponse, TaskSubscribeRequest,
+        },
+        domain::{ObjectMeta, Schedule, TaskTarget, TaskTrigger},
+        test_support::TestHarness,
+    };
+
+    #[tokio::test]
+    async fn scheduler_and_node_requests_round_trip() {
+        let harness = TestHarness::new("scheduler-node");
+        let daemon = harness.daemon.clone();
+        let schedule = sample_schedule("schedule.test");
+
+        let created_dispatch = daemon
+            .handle_request(request(
+                "req_schedule_create",
+                ApiMethod::ScheduleCreate,
+                ScheduleCreateRequest {
+                    schedule: schedule.clone(),
+                },
+            ))
+            .await;
+        let created: ScheduleGetResponse = ok_result(&created_dispatch.response);
+        assert_eq!(created.schedule.schedule_id, schedule.schedule_id);
+
+        let listed_dispatch = daemon
+            .handle_request(request(
+                "req_schedule_list",
+                ApiMethod::ScheduleList,
+                json!({}),
+            ))
+            .await;
+        let listed: ScheduleListResponse = ok_result(&listed_dispatch.response);
+        assert_eq!(listed.items.len(), 1);
+        assert_eq!(listed.items[0].schedule_id, schedule.schedule_id);
+        assert_eq!(listed.items[0].kind, "interval");
+
+        let node_list_dispatch = daemon
+            .handle_request(request("req_node_list", ApiMethod::NodeList, json!({})))
+            .await;
+        let nodes: crate::api::NodeListResponse = ok_result(&node_list_dispatch.response);
+        assert_eq!(nodes.items.len(), 1);
+        assert_eq!(nodes.items[0].node_id, "node.local");
+        assert!(nodes.items[0]
+            .capabilities
+            .iter()
+            .any(|capability| capability == "session.interaction"));
+
+        let node_get_dispatch = daemon
+            .handle_request(request(
+                "req_node_get",
+                ApiMethod::NodeGet,
+                json!({ "node_id": "node.local" }),
+            ))
+            .await;
+        let node: crate::api::NodeGetResponse = ok_result(&node_get_dispatch.response);
+        assert_eq!(node.node.node_id, "node.local");
+
+        let mut updated_schedule = schedule.clone();
+        updated_schedule.enabled = false;
+        let updated_dispatch = daemon
+            .handle_request(request(
+                "req_schedule_update",
+                ApiMethod::ScheduleUpdate,
+                ScheduleUpdateRequest {
+                    schedule: updated_schedule.clone(),
+                },
+            ))
+            .await;
+        let updated: ScheduleGetResponse = ok_result(&updated_dispatch.response);
+        assert!(!updated.schedule.enabled);
+
+        let deleted_dispatch = daemon
+            .handle_request(request(
+                "req_schedule_delete",
+                ApiMethod::ScheduleDelete,
+                ScheduleDeleteRequest {
+                    schedule_id: updated_schedule.schedule_id,
+                },
+            ))
+            .await;
+        let deleted: serde_json::Value = ok_result(&deleted_dispatch.response);
+        assert_eq!(deleted["accepted"], true);
+    }
+
+    #[tokio::test]
+    async fn followup_streams_and_cancellations_are_tracked() {
+        let harness = TestHarness::new("followups-cancel");
+        let daemon = harness.daemon.clone();
+
+        let session_sub_dispatch = daemon
+            .handle_request(request(
+                "req_session_subscribe",
+                ApiMethod::SessionSubscribe,
+                SessionSubscribeRequest {
+                    session_id: "session.default".into(),
+                    events: vec!["session.updated".into()],
+                },
+            ))
+            .await;
+        let session_subscription: SubscriptionResponse = ok_result(&session_sub_dispatch.response);
+        assert!(daemon
+            .control
+            .lock()
+            .expect("control lock poisoned")
+            .subscriptions
+            .contains_key(session_subscription.subscription_id.0.as_str()));
+
+        let session_send_dispatch = daemon
+            .handle_request(request(
+                "req_session_send",
+                ApiMethod::SessionSend,
+                SessionSendRequest {
+                    session_id: "session.default".into(),
+                    message: crate::api::SessionMessage::user("create a task"),
+                    stream: false,
+                },
+            ))
+            .await;
+        let _: SessionSendResponse = ok_result(&session_send_dispatch.response);
+        let task_list_dispatch = daemon
+            .handle_request(request("req_task_list", ApiMethod::TaskList, json!({})))
+            .await;
+        let task_list: TaskListResponse = ok_result(&task_list_dispatch.response);
+        let task_id = task_list
+            .items
+            .last()
+            .expect("expected task to be created")
+            .task_id
+            .clone();
+
+        let task_sub_dispatch = daemon
+            .handle_request(request(
+                "req_task_subscribe",
+                ApiMethod::TaskSubscribe,
+                TaskSubscribeRequest {
+                    task_id,
+                    events: vec!["task.updated".into()],
+                },
+            ))
+            .await;
+        let task_subscription: SubscriptionResponse = ok_result(&task_sub_dispatch.response);
+
+        let logs_dispatch = daemon
+            .handle_request(request(
+                "req_logs_tail",
+                ApiMethod::LogsTail,
+                LogsTailRequest {
+                    stream: true,
+                    level: None,
+                },
+            ))
+            .await;
+        let logs_response: serde_json::Value = ok_result(&logs_dispatch.response);
+        let stream_id = logs_response["stream_id"]
+            .as_str()
+            .expect("logs.tail missing stream_id")
+            .to_owned();
+        assert!(!logs_dispatch.followups.is_empty());
+        assert!(matches!(
+            logs_dispatch.followups.first(),
+            Some(ServerEnvelope::Stream(stream)) if matches!(stream.phase, StreamPhase::Start)
+        ));
+        assert!(matches!(
+            logs_dispatch.followups.last(),
+            Some(ServerEnvelope::Stream(stream)) if matches!(stream.phase, StreamPhase::End)
+        ));
+
+        let stream_cancel_dispatch = daemon
+            .handle_request(request(
+                "req_stream_cancel",
+                ApiMethod::StreamCancel,
+                StreamCancelRequest {
+                    stream_id: stream_id.clone().into(),
+                },
+            ))
+            .await;
+        let _: serde_json::Value = ok_result(&stream_cancel_dispatch.response);
+        assert_eq!(
+            daemon
+                .control
+                .lock()
+                .expect("control lock poisoned")
+                .streams
+                .get(stream_id.as_str())
+                .expect("stream missing after cancellation")
+                .status,
+            StreamStatus::Cancelled
+        );
+
+        let session_cancel_dispatch = daemon
+            .handle_request(request(
+                "req_session_sub_cancel",
+                ApiMethod::SubscriptionCancel,
+                SubscriptionCancelRequest {
+                    subscription_id: session_subscription.subscription_id,
+                },
+            ))
+            .await;
+        let _: serde_json::Value = ok_result(&session_cancel_dispatch.response);
+        let task_cancel_dispatch = daemon
+            .handle_request(request(
+                "req_task_sub_cancel",
+                ApiMethod::SubscriptionCancel,
+                SubscriptionCancelRequest {
+                    subscription_id: task_subscription.subscription_id,
+                },
+            ))
+            .await;
+        let _: serde_json::Value = ok_result(&task_cancel_dispatch.response);
+        assert!(daemon
+            .control
+            .lock()
+            .expect("control lock poisoned")
+            .subscriptions
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_send_streaming_dispatch_exposes_live_stream() {
+        let harness = TestHarness::new("live-stream-dispatch");
+        let daemon = harness.daemon.clone();
+
+        let dispatch = daemon
+            .handle_request(request(
+                "req_streaming_send",
+                ApiMethod::SessionSend,
+                SessionSendRequest {
+                    session_id: "session.default".into(),
+                    message: crate::api::SessionMessage::user("stream this turn"),
+                    stream: true,
+                },
+            ))
+            .await;
+        let response: SessionSendResponse = ok_result(&dispatch.response);
+        let stream_id = response
+            .stream_id
+            .expect("streaming session.send missing stream_id")
+            .0;
+        let mut live_stream = dispatch
+            .live_stream
+            .expect("streaming dispatch missing live stream receiver");
+
+        let mut phases = Vec::new();
+        let mut events = Vec::new();
+        while let Some(envelope) = live_stream.recv().await {
+            match envelope {
+                ServerEnvelope::Stream(stream) => {
+                    assert_eq!(stream.stream_id.0, stream_id);
+                    phases.push(stream.phase.clone());
+                    events.push(stream.event);
+                    if matches!(stream.phase, StreamPhase::End) {
+                        break;
+                    }
+                }
+                other => panic!("expected stream envelope, got {other:?}"),
+            }
+        }
+
+        assert_eq!(phases.first(), Some(&StreamPhase::Start));
+        assert_eq!(phases.last(), Some(&StreamPhase::End));
+        assert!(events.iter().any(|event| event == "turn.started"));
+        assert!(events.iter().any(|event| event == "stream.completed"));
+    }
+
+    fn request<T>(id: &str, method: ApiMethod, params: T) -> RequestEnvelope
+    where
+        T: serde::Serialize,
+    {
+        RequestEnvelope {
+            id: RequestId(id.into()),
+            method,
+            params: serde_json::to_value(params).expect("failed to serialize request params"),
+            meta: None,
+        }
+    }
+
+    fn ok_result<T>(response: &ServerEnvelope) -> T
+    where
+        T: DeserializeOwned,
+    {
+        match response {
+            ServerEnvelope::Response(response) => {
+                assert!(response.ok, "expected ok response, got {response:?}");
+                serde_json::from_value(response.result.clone().expect("missing response result"))
+                    .expect("failed to decode response result")
+            }
+            other => panic!("expected response envelope, got {other:?}"),
+        }
+    }
+
+    fn sample_schedule(schedule_id: &str) -> Schedule {
+        Schedule {
+            meta: ObjectMeta::new(schedule_id, "state.v1"),
+            schedule_id: schedule_id.into(),
+            name: "Test Schedule".into(),
+            trigger: TaskTrigger::Interval { seconds: 60 },
+            target: TaskTarget::WorkflowRef {
+                workflow_id: "workflow.test".into(),
+            },
+            enabled: true,
+        }
+    }
+}

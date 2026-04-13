@@ -369,18 +369,18 @@
 - [ ] 将 OpenAI billing 从 placeholder local estimate 提升为正式最小实现
 - [ ] 让 scheduler plugin 不再只有 manifest，而具备最小执行闭环
 - [ ] 让 node registry/plugin 不再只有静态声明，而具备最小 inspect / selector 落点
-- [ ] 为 usage / billing / scheduler / node 补最小回归测试
+- [x] 为 usage / billing / scheduler / node 补最小回归测试
 
 ## Batch 15: Surface / Transport Completion
 执行前先读：
 - `docs/CHANNELS_DAEMON_CLIENT_SPEC.md`
 - `docs/DAEMON_API_IPC_SCHEMA.md`
 
-- [ ] 补齐 WebSocket transport 的真实可用性验证，而不只保留最小 server
-- [ ] 校对 daemon API 实现与 schema 文档漂移
-- [ ] 为 subscription / stream / cancellation / followup events 增加更强回归测试
-- [ ] 明确 core surfaces 与 plugin channels 的代码边界
-- [ ] 保持 Telegram 等外部 channel 仍是插件，而不是回流进 core surface
+- [x] 补齐 WebSocket transport 的真实可用性验证，而不只保留最小 server
+- [x] 校对 daemon API 实现与 schema 文档漂移
+- [x] 为 subscription / stream / cancellation / followup events 增加更强回归测试
+- [x] 明确 core surfaces 与 plugin channels 的代码边界
+- [x] 保持 Telegram 等外部 channel 仍是插件，而不是回流进 core surface
 
 ---
 ## 明确不优先做

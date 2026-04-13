@@ -21,6 +21,7 @@ use crate::{
         EventSource, EventType, ObjectMeta, ResumePack, RuntimeEvent, Session, SessionMode,
         SessionStatus, Task, TaskCheckpoint, TaskPhase, TaskTimelineEntry,
     },
+    surface::CoreSurface,
 };
 
 pub struct DaemonStore {
@@ -424,7 +425,7 @@ fn default_session(runtime_config: &RuntimeConfig) -> Session {
         workspace_id: runtime_config.workspace.workspace_id.clone(),
         agent_id: runtime_config.agent_runtime.default_agent.agent_id.clone(),
         channel_id: None,
-        surface_id: Some("cli.local".into()),
+        surface_id: Some(CoreSurface::CliLocal.id().into()),
         user_id: Some("operator.local".into()),
         title: Some("Default Session".into()),
         mode: SessionMode::Interactive,

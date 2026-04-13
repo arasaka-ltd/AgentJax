@@ -72,7 +72,7 @@ impl HelloAckEnvelope {
         Self {
             ok: true,
             api_version: api_version.into(),
-            schema_version: "2026-04-10".into(),
+            schema_version: crate::daemon::SCHEMA_VERSION.into(),
             daemon_version: env!("CARGO_PKG_VERSION").into(),
             connection_id,
         }
@@ -197,3 +197,72 @@ impl ApiErrorEnvelope {
 
 pub type EventEnvelope = EventPayload;
 pub type StreamEnvelope = StreamPayload;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde_json::json;
+
+    #[test]
+    fn hello_ack_uses_shared_schema_version_constant() {
+        let ack = HelloAckEnvelope::new(ConnectionId("conn_test".into()), "v1");
+        assert_eq!(ack.schema_version, crate::daemon::SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn server_and_client_envelopes_match_documented_wire_tags() {
+        let request = ClientEnvelope::Request(RequestEnvelope {
+            id: RequestId("req_1".into()),
+            method: ApiMethod::SessionSend,
+            params: json!({}),
+            meta: Some(RequestMeta {
+                surface_id: Some("cli.local".into()),
+                ..RequestMeta::default()
+            }),
+        });
+        let request_json = serde_json::to_value(&request).expect("request serialization failed");
+        assert_eq!(request_json["type"], "request");
+        assert_eq!(request_json["method"], "session.send");
+
+        let hello_ack =
+            ServerEnvelope::HelloAck(HelloAckEnvelope::new(ConnectionId("conn_1".into()), "v1"));
+        assert_eq!(
+            serde_json::to_value(&hello_ack).expect("hello_ack serialization failed")["type"],
+            "hello_ack"
+        );
+
+        let event = ServerEnvelope::Event(EventEnvelope {
+            event: "task.updated".into(),
+            subscription_id: SubscriptionId("sub_1".into()),
+            seq: 42,
+            data: json!({ "ok": true }),
+            meta: None,
+        });
+        let event_json = serde_json::to_value(&event).expect("event serialization failed");
+        assert_eq!(event_json["type"], "event");
+        assert_eq!(event_json["event"], "task.updated");
+
+        let stream = ServerEnvelope::Stream(StreamEnvelope {
+            stream_id: StreamId("str_1".into()),
+            phase: StreamPhase::Chunk,
+            event: "assistant.text.delta".into(),
+            seq: 3,
+            data: json!({ "text": "hi" }),
+            meta: None,
+        });
+        let stream_json = serde_json::to_value(&stream).expect("stream serialization failed");
+        assert_eq!(stream_json["type"], "stream");
+        assert_eq!(stream_json["phase"], "chunk");
+
+        let error = ServerEnvelope::Error(ApiErrorEnvelope::new(ApiError::new(
+            crate::api::ApiErrorCode::ProtocolViolation,
+            "missing hello handshake",
+            false,
+        )));
+        assert_eq!(
+            serde_json::to_value(&error).expect("error serialization failed")["type"],
+            "error"
+        );
+    }
+}

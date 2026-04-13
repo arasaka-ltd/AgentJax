@@ -9,4 +9,8 @@ pub mod core;
 pub mod daemon;
 pub mod domain;
 pub mod plugins;
+pub mod surface;
 pub mod transport;
+
+#[cfg(test)]
+pub(crate) mod test_support;

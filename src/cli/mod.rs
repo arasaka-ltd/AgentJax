@@ -17,6 +17,7 @@ use crate::{
     config::{ConfigLoader, InitMode},
     daemon::Daemon,
     plugins::openai::{OpenAiModelCatalog, OpenAiProviderAdapter, OpenAiProviderConfig},
+    surface::CoreSurface,
     transport::{unix::UnixSocketClient, unix::UnixSocketServer, websocket::WebSocketServer},
 };
 
@@ -361,7 +362,7 @@ where
                     id: "operator.local".into(),
                     label: "agentjax-cli".into(),
                 }),
-                surface_id: Some("cli.local".into()),
+                surface_id: Some(CoreSurface::CliLocal.id().into()),
                 ..RequestMeta::default()
             }),
         })
@@ -404,7 +405,7 @@ pub async fn session_send(
                 }),
                 meta: Some(RequestMeta {
                     requester: Some(actor),
-                    surface_id: Some("cli.local".into()),
+                    surface_id: Some(CoreSurface::CliLocal.id().into()),
                     ..RequestMeta::default()
                 }),
             },
