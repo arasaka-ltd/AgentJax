@@ -72,7 +72,9 @@ pub(super) fn shell_tool_result_events(
                 }
             }
             if let Some(completed_exec) = metadata.get("completed_exec") {
-                let event_type = match completed_exec.get("status").and_then(|value| value.as_str())
+                let event_type = match completed_exec
+                    .get("status")
+                    .and_then(|value| value.as_str())
                 {
                     Some("interrupted") => EventType::ShellExecutionInterrupted,
                     Some("failed") | Some("timed_out") => EventType::ShellExecutionFailed,
@@ -690,10 +692,7 @@ pub(super) fn chunk_stream_text(content: &str) -> Vec<String> {
     chunks
 }
 
-pub(super) fn build_log_stream_envelopes(
-    stream_id: &str,
-    lines: &[String],
-) -> Vec<ServerEnvelope> {
+pub(super) fn build_log_stream_envelopes(stream_id: &str, lines: &[String]) -> Vec<ServerEnvelope> {
     let mut followups = vec![ServerEnvelope::Stream(StreamEnvelope {
         stream_id: stream_id.into(),
         phase: StreamPhase::Start,

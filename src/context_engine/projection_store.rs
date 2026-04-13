@@ -1,15 +1,18 @@
-use crate::domain::ContextBlock;
+use crate::domain::ContextProjection;
 use std::sync::{Arc, Mutex};
+
 #[derive(Debug, Clone, Default)]
 pub struct ProjectionStore {
-    blocks: Arc<Mutex<Vec<ContextBlock>>>,
+    projection: Arc<Mutex<Option<ContextProjection>>>,
 }
+
 impl ProjectionStore {
-    pub fn replace(&self, blocks: Vec<ContextBlock>) {
-        *self.blocks.lock().expect("projection store poisoned") = blocks;
+    pub fn replace(&self, projection: ContextProjection) {
+        *self.projection.lock().expect("projection store poisoned") = Some(projection);
     }
-    pub fn current(&self) -> Vec<ContextBlock> {
-        self.blocks
+
+    pub fn current(&self) -> Option<ContextProjection> {
+        self.projection
             .lock()
             .expect("projection store poisoned")
             .clone()

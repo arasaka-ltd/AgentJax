@@ -333,13 +333,13 @@
 - `docs/LCM_CONTEXT_ENGINE.md`
 - `docs/EVENT_TASK_LCM_RUNTIME.md`
 
-- [ ] 将当前 context engine 从最小 assembly 扩展到更接近 spec：
+- [x] 将当前 context engine 从最小 assembly 扩展到更接近 spec：
   - active context projection
   - summary nodes
   - checkpoint / resume pack 深化
-- [ ] 为 event-stream-first 上下文恢复建立更正式的数据边界
-- [ ] 引入最小 compaction / invalidation / recompute 流程
-- [ ] 为 resume-first 设计补最小可验证闭环
+- [x] 为 event-stream-first 上下文恢复建立更正式的数据边界
+- [x] 引入最小 compaction / invalidation / recompute 流程
+- [x] 为 resume-first 设计补最小可验证闭环
 - [ ] 清理 context / LCM 文档与代码漂移
 
 ## Batch 14: Usage / Billing / Scheduler / Node Deepening

@@ -61,7 +61,9 @@ impl Daemon {
             ApiMethod::SessionModelInspect => {
                 self.handle_session_model_inspect(request.parse_params()?)
             }
-            ApiMethod::SessionModelSwitch => self.handle_session_model_switch(request.parse_params()?),
+            ApiMethod::SessionModelSwitch => {
+                self.handle_session_model_switch(request.parse_params()?)
+            }
             ApiMethod::SessionCancel => self.handle_session_cancel(request.parse_params()?),
             ApiMethod::SessionSubscribe => self.handle_session_subscribe(request.parse_params()?),
             ApiMethod::SessionSend => self.handle_session_send(request.parse_params()?).await,
@@ -108,22 +110,24 @@ impl Daemon {
         params: ConfigInspectRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
         let config = match params.section.as_str() {
-            "runtime" | "core" => serde_json::to_value(&self.app.runtime_config).map_err(|error| {
-                ApiError::new(
-                    ApiErrorCode::InternalError,
-                    format!("config inspect serialization failed: {error}"),
-                    false,
-                )
-            })?,
-            "workspace" => serde_json::to_value(&self.app.workspace_runtime.workspace).map_err(
-                |error| {
+            "runtime" | "core" => {
+                serde_json::to_value(&self.app.runtime_config).map_err(|error| {
+                    ApiError::new(
+                        ApiErrorCode::InternalError,
+                        format!("config inspect serialization failed: {error}"),
+                        false,
+                    )
+                })?
+            }
+            "workspace" => {
+                serde_json::to_value(&self.app.workspace_runtime.workspace).map_err(|error| {
                     ApiError::new(
                         ApiErrorCode::InternalError,
                         format!("workspace inspect serialization failed: {error}"),
                         false,
                     )
-                },
-            )?,
+                })?
+            }
             "plugins" => serde_json::to_value(self.plugin_descriptors()).map_err(|error| {
                 ApiError::new(
                     ApiErrorCode::InternalError,
@@ -131,15 +135,15 @@ impl Daemon {
                     false,
                 )
             })?,
-            "resources" => serde_json::to_value(self.app.resource_registry.all()).map_err(
-                |error| {
+            "resources" => {
+                serde_json::to_value(self.app.resource_registry.all()).map_err(|error| {
                     ApiError::new(
                         ApiErrorCode::InternalError,
                         format!("resource inspect serialization failed: {error}"),
                         false,
                     )
-                },
-            )?,
+                })?
+            }
             other => {
                 return Err(ApiError::new(
                     ApiErrorCode::InvalidRequest,

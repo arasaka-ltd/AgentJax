@@ -752,13 +752,16 @@ impl Daemon {
                 payload,
             )
             .map_err(map_store_error)?;
-        self.app.context_engine.append_event(event).map_err(|error| {
-            ApiError::new(
-                ApiErrorCode::InternalError,
-                format!("context engine append failed: {error}"),
-                false,
-            )
-        })
+        self.app
+            .context_engine
+            .append_event(event)
+            .map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::InternalError,
+                    format!("context engine append failed: {error}"),
+                    false,
+                )
+            })
     }
 
     pub(super) async fn execute_tool_call(&self, tool_call: &ToolCall) -> Result<String, ApiError> {
