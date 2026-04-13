@@ -65,11 +65,13 @@ impl Default for ProvidersLlmConfig {
     fn default() -> Self {
         Self {
             default_provider_id: "openai-default".into(),
-            providers: vec![LlmProviderConfig::new(
-                "openai-default",
-                "openai",
-                crate::config::OpenAiProviderConfig::default(),
-            )],
+            providers: vec![LlmProviderConfig {
+                provider_id: "openai-default".into(),
+                kind: "openai".into(),
+                settings: serde_json::json!({
+                    "api_key_env": "OPENAI_API_KEY",
+                }),
+            }],
         }
     }
 }

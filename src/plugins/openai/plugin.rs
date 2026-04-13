@@ -10,12 +10,13 @@ use serde_json::{json, Value};
 use crate::{
     builtin::tools::ToolDefinition,
     config::{
-        AgentDefinition, ModelCatalogSnapshot, ModelInfoSnapshot, OpenAiProviderConfig,
+        AgentDefinition, LlmProviderConfig, ModelCatalogSnapshot, ModelInfoSnapshot,
         ProviderModelCatalog,
     },
     core::{
         plugin::{stream_model_turn, ModelEventStream, ProviderPromptRequest},
-        BillingPlugin, Plugin, PluginContext, ProviderPlugin, ResourceProviderPlugin,
+        BillingPlugin, Plugin, PluginContext, PluginManagerCandidate, PluginRef, ProviderPlugin,
+        ResourceProviderPlugin,
     },
     domain::{
         AssistantTextItem, BillingBreakdownItem, BillingCapability, BillingConfidence, BillingMode,
@@ -24,6 +25,65 @@ use crate::{
         ResourceId, ResourceKind, ResourceStatus, ToolCallItem, UsageCategory, UsageRecord,
     },
 };
+use std::path::Path;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenAiProviderConfig {
+    pub provider_id: String,
+    pub api_key: Option<String>,
+    pub api_key_env: String,
+    pub base_url: Option<String>,
+    pub organization: Option<String>,
+    pub project: Option<String>,
+}
+
+impl Default for OpenAiProviderConfig {
+    fn default() -> Self {
+        Self {
+            provider_id: "openai-default".into(),
+            api_key: None,
+            api_key_env: "OPENAI_API_KEY".into(),
+            base_url: None,
+            organization: None,
+            project: None,
+        }
+    }
+}
+
+impl OpenAiProviderConfig {
+    pub fn resolve_api_key(&self) -> Result<String> {
+        if let Some(api_key) = &self.api_key {
+            if !api_key.is_empty() {
+                return Ok(api_key.clone());
+            }
+        }
+
+        std::env::var(&self.api_key_env).map_err(|_| {
+            anyhow!(
+                "missing OpenAI API key: set {} or provide provider settings.api_key",
+                self.api_key_env
+            )
+        })
+    }
+
+    pub fn effective_base_url(&self) -> String {
+        self.base_url
+            .clone()
+            .unwrap_or_else(|| "https://api.openai.com/v1".into())
+    }
+
+    pub fn endpoint_url(&self, path: &str) -> String {
+        let base = self.effective_base_url();
+        let base = base.trim_end_matches('/');
+        let path = path.trim_start_matches('/');
+
+        if base.ends_with("/v1") {
+            format!("{base}/{path}")
+        } else {
+            format!("{base}/v1/{path}")
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenAiRawModel {
@@ -704,6 +764,20 @@ impl OpenAiProviderPlugin {
     pub fn new(config: OpenAiProviderConfig) -> Self {
         Self { config }
     }
+}
+
+pub fn provider_candidate(
+    provider: &LlmProviderConfig,
+    config_root: &Path,
+) -> Result<PluginManagerCandidate> {
+    let config: OpenAiProviderConfig = provider.settings_as_resolved(config_root)?;
+    let plugin = std::sync::Arc::new(OpenAiProviderPlugin::new(config));
+    Ok(PluginManagerCandidate::provider(
+        plugin.clone() as PluginRef,
+        plugin.clone(),
+        plugin.provided_resources(),
+        true,
+    ))
 }
 
 #[async_trait]

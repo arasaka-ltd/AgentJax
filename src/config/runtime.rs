@@ -2,9 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::{
-    LlmProviderConfig, OpenAiProviderConfig, PluginsConfig, RuntimePaths, WorkspaceConfig,
-};
+use super::{LlmProviderConfig, PluginsConfig, RuntimePaths, WorkspaceConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeConfig {
@@ -91,11 +89,13 @@ impl Default for LlmRuntimeConfig {
     fn default() -> Self {
         Self {
             default_provider_id: "openai-default".into(),
-            providers: vec![LlmProviderConfig::new(
-                "openai-default",
-                "openai",
-                OpenAiProviderConfig::default(),
-            )],
+            providers: vec![LlmProviderConfig {
+                provider_id: "openai-default".into(),
+                kind: "openai".into(),
+                settings: serde_json::json!({
+                    "api_key_env": "OPENAI_API_KEY",
+                }),
+            }],
             model_catalog: ModelCatalogSnapshot::default(),
         }
     }

@@ -1,10 +1,24 @@
-use crate::config::provider::MockProviderConfig;
+use crate::config::LlmProviderConfig;
 use crate::core::plugin::ProviderPromptRequest;
-use crate::core::{Plugin, PluginContext, ProviderPlugin};
+use crate::core::{Plugin, PluginContext, PluginManagerCandidate, PluginRef, ProviderPlugin};
 use crate::domain::{ModelTurnOutput, PluginCapability, PluginManifest};
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MockProviderConfig {
+    pub provider_id: String,
+}
+
+impl Default for MockProviderConfig {
+    fn default() -> Self {
+        Self {
+            provider_id: "mock-default".into(),
+        }
+    }
+}
 
 pub struct MockProviderPlugin {
     config: MockProviderConfig,
@@ -20,6 +34,17 @@ impl MockProviderPlugin {
             next_response: Arc::new(Mutex::new(None)),
         }
     }
+}
+
+pub fn provider_candidate(provider: &LlmProviderConfig) -> Result<PluginManagerCandidate> {
+    let config: MockProviderConfig = provider.settings_as()?;
+    let plugin = Arc::new(MockProviderPlugin::new(config));
+    Ok(PluginManagerCandidate::provider(
+        plugin.clone() as PluginRef,
+        plugin.clone(),
+        vec![],
+        true,
+    ))
 }
 
 #[async_trait]

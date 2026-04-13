@@ -3,19 +3,16 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::builtin::tools::ToolRegistry;
-use crate::config::{
-    ConfigRoot, MockProviderConfig, OpenAiProviderConfig, RuntimeConfig, RuntimeConfigSnapshot,
-    WorkspaceIdentityPack,
-};
+use crate::config::{ConfigRoot, RuntimeConfig, RuntimeConfigSnapshot, WorkspaceIdentityPack};
 use crate::context_engine::{ContextEngine, WorkspaceContextEngine};
 use crate::core::{
     ApplicationRuntime, EventBus, HookBus, PluginHost, PluginManager, PluginManagerCandidate,
-    PluginRef, PluginRegistry, ResourceProviderPlugin, ResourceRegistry, RuntimeHost,
-    WorkspaceRuntime, WorkspaceRuntimeHost,
+    PluginRef, PluginRegistry, ResourceRegistry, RuntimeHost, WorkspaceRuntime,
+    WorkspaceRuntimeHost,
 };
 use crate::plugins::{
-    local_scheduler::LocalSchedulerPlugin, openai::OpenAiProviderPlugin,
-    static_nodes::StaticNodeRegistryPlugin, telegram::TelegramChannelPlugin,
+    local_scheduler::LocalSchedulerPlugin, static_nodes::StaticNodeRegistryPlugin,
+    telegram::TelegramChannelPlugin,
 };
 
 #[derive(Clone)]
@@ -133,33 +130,10 @@ fn plugin_candidates(runtime_config: &RuntimeConfig) -> Result<Vec<PluginManager
     let mut candidates = Vec::new();
 
     for provider in &runtime_config.agent_runtime.llm.providers {
-        match provider.kind() {
-            "openai" => {
-                let config: OpenAiProviderConfig =
-                    provider.settings_as_resolved(&runtime_config.config_root)?;
-                let plugin = Arc::new(OpenAiProviderPlugin::new(config.clone()));
-                candidates.push(PluginManagerCandidate::provider(
-                    plugin.clone() as PluginRef,
-                    plugin.clone(),
-                    plugin.provided_resources(),
-                    true,
-                ));
-            }
-            "mock" => {
-                let config: MockProviderConfig =
-                    provider.settings_as_resolved(&runtime_config.config_root)?;
-                let plugin = Arc::new(crate::plugins::mock::MockProviderPlugin::new(
-                    config.clone(),
-                ));
-                candidates.push(PluginManagerCandidate::provider(
-                    plugin.clone() as PluginRef,
-                    plugin.clone(),
-                    vec![],
-                    true,
-                ));
-            }
-            _ => {}
-        }
+        candidates.push(crate::plugins::provider_candidate(
+            provider,
+            &runtime_config.config_root,
+        )?);
     }
 
     candidates.push(PluginManagerCandidate::plugin(

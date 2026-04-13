@@ -15,7 +15,7 @@ pub use migrator::{ConfigMigrationReport, MigrationStep};
 pub use normalizer::NormalizedConfig;
 pub use paths::{ConfigRoot, RuntimePaths, WorkspacePaths};
 pub use plugins::PluginsConfig;
-pub use provider::{LlmProviderConfig, MockProviderConfig, OpenAiProviderConfig};
+pub use provider::LlmProviderConfig;
 pub use runtime::{
     AgentDefinition, AgentRuntimeConfig, LlmRuntimeConfig, ModelCatalogSnapshot, ModelInfoSnapshot,
     ProviderModelCatalog, RuntimeConfig,

@@ -14,9 +14,9 @@ use crate::{
         SessionSendResponse,
     },
     bootstrap::bootstrap_application,
-    config::{ConfigLoader, InitMode, OpenAiProviderConfig},
+    config::{ConfigLoader, InitMode},
     daemon::Daemon,
-    plugins::openai::{OpenAiModelCatalog, OpenAiProviderAdapter},
+    plugins::openai::{OpenAiModelCatalog, OpenAiProviderAdapter, OpenAiProviderConfig},
     transport::{unix::UnixSocketClient, unix::UnixSocketServer, websocket::WebSocketServer},
 };
 
