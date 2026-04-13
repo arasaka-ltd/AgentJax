@@ -16,10 +16,15 @@ use crate::{
     builtin::storage::sqlite::SqlitePersistence,
     config::RuntimeConfig,
     core::{EventStore, PersistenceStore, SessionRecord, SessionStore},
-    daemon::task_store::{initial_task_record, StoredTaskRecord, TaskStore},
+    daemon::{
+        ledger_store::{LedgerStore, UsageSummary},
+        schedule_store::{ScheduleStore, StoredScheduleRecord},
+        task_store::{initial_task_record, StoredTaskRecord, TaskStore},
+    },
     domain::{
-        EventSource, EventType, ObjectMeta, ResumePack, RuntimeEvent, Session, SessionMode,
-        SessionStatus, Task, TaskCheckpoint, TaskPhase, TaskTimelineEntry,
+        BillingRecord, EventSource, EventType, ObjectMeta, ResumePack, RuntimeEvent, Schedule,
+        Session, SessionMode, SessionStatus, Task, TaskCheckpoint, TaskPhase, TaskTimelineEntry,
+        UsageRecord,
     },
     surface::CoreSurface,
 };
@@ -37,9 +42,13 @@ pub struct DaemonStore {
     next_subscription: AtomicU64,
     next_task: AtomicU64,
     next_checkpoint: AtomicU64,
+    next_usage: AtomicU64,
+    next_billing: AtomicU64,
     active_turn_sessions: Mutex<BTreeSet<String>>,
     persistence: Arc<dyn PersistenceStore>,
     tasks: TaskStore,
+    ledger: LedgerStore,
+    schedules: ScheduleStore,
 }
 
 impl DaemonStore {
@@ -47,6 +56,8 @@ impl DaemonStore {
         let sqlite = SqlitePersistence::open(&runtime_config)?;
         let persistence: Arc<dyn PersistenceStore> = Arc::new(SqlitePersistenceBridge::new(sqlite));
         let tasks = TaskStore::open(&runtime_config)?;
+        let ledger = LedgerStore::open(&runtime_config)?;
+        let schedules = ScheduleStore::open(&runtime_config)?;
 
         let store = Self {
             runtime_config,
@@ -61,9 +72,13 @@ impl DaemonStore {
             next_subscription: AtomicU64::new(1),
             next_task: AtomicU64::new(1),
             next_checkpoint: AtomicU64::new(1),
+            next_usage: AtomicU64::new(1),
+            next_billing: AtomicU64::new(1),
             active_turn_sessions: Mutex::new(BTreeSet::new()),
             persistence,
             tasks,
+            ledger,
+            schedules,
         };
         store.reseed_identity_counters()?;
         store.ensure_default_session()?;
@@ -126,6 +141,16 @@ impl DaemonStore {
         format!("checkpoint_{id}")
     }
 
+    pub fn next_usage_id(&self) -> String {
+        let id = self.next_usage.fetch_add(1, Ordering::Relaxed);
+        format!("usage_{id}")
+    }
+
+    pub fn next_billing_id(&self) -> String {
+        let id = self.next_billing.fetch_add(1, Ordering::Relaxed);
+        format!("billing_{id}")
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
         self.persistence.list_sessions()
     }
@@ -150,6 +175,39 @@ impl DaemonStore {
 
     pub fn list_tasks(&self) -> Result<Vec<StoredTaskRecord>> {
         self.tasks.list()
+    }
+
+    pub fn list_schedules(&self) -> Result<Vec<StoredScheduleRecord>> {
+        self.schedules.list()
+    }
+
+    pub fn get_schedule(&self, schedule_id: &str) -> Result<Option<StoredScheduleRecord>> {
+        self.schedules.get(schedule_id)
+    }
+
+    pub fn upsert_schedule(&self, schedule: Schedule) -> Result<StoredScheduleRecord> {
+        self.schedules.upsert(schedule)
+    }
+
+    pub fn delete_schedule(&self, schedule_id: &str) -> Result<Option<StoredScheduleRecord>> {
+        self.schedules.delete(schedule_id)
+    }
+
+    pub fn due_schedules(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<StoredScheduleRecord>> {
+        self.schedules.due_records(now)
+    }
+
+    pub fn mark_schedule_triggered(
+        &self,
+        schedule_id: &str,
+        task_id: Option<&str>,
+        triggered_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<StoredScheduleRecord> {
+        self.schedules
+            .mark_triggered(schedule_id, task_id, triggered_at)
     }
 
     pub fn get_task(&self, task_id: &str) -> Result<Option<StoredTaskRecord>> {
@@ -275,6 +333,26 @@ impl DaemonStore {
         })
     }
 
+    pub fn append_usage_record(&self, record: UsageRecord) -> Result<UsageRecord> {
+        self.ledger.append_usage(record)
+    }
+
+    pub fn append_billing_record(&self, record: BillingRecord) -> Result<BillingRecord> {
+        self.ledger.append_billing(record)
+    }
+
+    pub fn list_usage_records(&self) -> Result<Vec<UsageRecord>> {
+        self.ledger.list_usage()
+    }
+
+    pub fn list_billing_records(&self) -> Result<Vec<BillingRecord>> {
+        self.ledger.list_billing()
+    }
+
+    pub fn usage_summary(&self) -> Result<UsageSummary> {
+        self.ledger.usage_summary()
+    }
+
     fn ensure_default_session(&self) -> Result<()> {
         let session_id = "session.default";
         if self.persistence.get_session(session_id)?.is_none() {
@@ -293,6 +371,8 @@ impl DaemonStore {
         let mut next_event = 1_u64;
         let mut next_task = 1_u64;
         let mut next_checkpoint = 1_u64;
+        let mut next_usage = 1_u64;
+        let mut next_billing = 1_u64;
 
         for record in &sessions {
             if let Some(last_turn_id) = record.session.last_turn_id.as_deref() {
@@ -336,12 +416,21 @@ impl DaemonStore {
             }
         }
 
+        for record in self.ledger.list_usage()? {
+            next_usage = next_usage.max(next_counter_value(&record.usage_id, "usage_"));
+        }
+        for record in self.ledger.list_billing()? {
+            next_billing = next_billing.max(next_counter_value(&record.billing_id, "billing_"));
+        }
+
         self.next_message.store(next_message, Ordering::Relaxed);
         self.next_turn.store(next_turn, Ordering::Relaxed);
         self.next_event.store(next_event, Ordering::Relaxed);
         self.next_task.store(next_task, Ordering::Relaxed);
         self.next_checkpoint
             .store(next_checkpoint, Ordering::Relaxed);
+        self.next_usage.store(next_usage, Ordering::Relaxed);
+        self.next_billing.store(next_billing, Ordering::Relaxed);
         Ok(())
     }
 }

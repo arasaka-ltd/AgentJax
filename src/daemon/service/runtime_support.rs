@@ -61,32 +61,12 @@ impl Daemon {
         }
     }
 
-    pub(super) fn default_node(&self) -> Node {
-        Node {
-            meta: ObjectMeta::new("node.local", &self.app.runtime_config.state_schema_version),
-            node_id: "node.local".into(),
-            kind: NodeKind::Static,
-            platform: std::env::consts::OS.into(),
-            status: if self.store.draining() {
-                NodeStatus::Draining
-            } else {
-                NodeStatus::Active
-            },
-            capabilities: vec![
-                "daemon.control_plane".into(),
-                "session.interaction".into(),
-                "tool.dispatch".into(),
-            ],
-            resources: self
-                .app
-                .resource_registry
-                .all()
-                .into_iter()
-                .map(|resource| resource.resource_id.0)
-                .collect(),
-            trust_level: TrustLevel::High,
-            labels: BTreeMap::from([("scope".into(), "local".into())]),
-        }
+    pub(super) fn node_registry(&self) -> crate::daemon::node_registry::NodeRegistry {
+        crate::daemon::node_registry::NodeRegistry::from_runtime(
+            &self.app.runtime_config,
+            &self.app.resource_registry,
+            self.store.draining(),
+        )
     }
 
     pub(super) fn push_log(&self, line: impl Into<String>) {

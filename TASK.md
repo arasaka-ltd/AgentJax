@@ -359,16 +359,16 @@
 - [x] 为 event-stream-first 上下文恢复建立更正式的数据边界
 - [x] 引入最小 compaction / invalidation / recompute 流程
 - [x] 为 resume-first 设计补最小可验证闭环
-- [ ] 清理 context / LCM 文档与代码漂移
+- [x] 清理 context / LCM 文档与代码漂移
 
 ## Batch 14: Usage / Billing / Scheduler / Node Deepening
 执行前先读：
 - `docs/USAGE_BILLING_SCHEDULER_NODE_SPEC.md`
 
-- [ ] 让 usage ledger 不再只是事件附属信息，而形成明确统计面
-- [ ] 将 OpenAI billing 从 placeholder local estimate 提升为正式最小实现
-- [ ] 让 scheduler plugin 不再只有 manifest，而具备最小执行闭环
-- [ ] 让 node registry/plugin 不再只有静态声明，而具备最小 inspect / selector 落点
+- [x] 让 usage ledger 不再只是事件附属信息，而形成明确统计面
+- [x] 将 OpenAI billing 从 placeholder local estimate 提升为正式最小实现
+- [x] 让 scheduler plugin 不再只有 manifest，而具备最小执行闭环
+- [x] 让 node registry/plugin 不再只有静态声明，而具备最小 inspect / selector 落点
 - [x] 为 usage / billing / scheduler / node 补最小回归测试
 
 ## Batch 15: Surface / Transport Completion

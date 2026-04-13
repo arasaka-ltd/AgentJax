@@ -42,6 +42,7 @@ pub fn provider_candidate(provider: &LlmProviderConfig) -> Result<PluginManagerC
     Ok(PluginManagerCandidate::provider(
         plugin.clone() as PluginRef,
         plugin.clone(),
+        None,
         vec![],
         true,
     ))
@@ -98,7 +99,10 @@ impl ProviderPlugin for MockProviderPlugin {
                 output_id: "mock_output".into(),
                 items: vec![],
                 finish_reason: crate::domain::FinishReason::Completed,
-                usage: None,
+                usage: Some(crate::domain::ModelUsage {
+                    input_tokens: Some(64),
+                    output_tokens: Some(16),
+                }),
             })
         }
     }

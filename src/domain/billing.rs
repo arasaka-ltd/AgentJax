@@ -36,3 +36,17 @@ pub struct BillingRecord {
     pub breakdown: Vec<BillingBreakdownItem>,
     pub generated_at: chrono::DateTime<chrono::Utc>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BillingReconciliation {
+    pub reconciliation_id: String,
+    pub usage_id: String,
+    pub local_estimate_amount: String,
+    pub provider_reported_amount: Option<String>,
+    pub reconciled_amount: Option<String>,
+    pub delta_amount: Option<String>,
+    pub currency: String,
+    pub last_reconciled_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub provider_reference: Option<String>,
+    pub note: Option<String>,
+}

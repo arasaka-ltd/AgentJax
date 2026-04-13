@@ -142,11 +142,11 @@ fn plugin_candidates(runtime_config: &RuntimeConfig) -> Result<Vec<PluginManager
     ));
     candidates.push(PluginManagerCandidate::plugin(
         Arc::new(LocalSchedulerPlugin) as PluginRef,
-        false,
+        true,
     ));
     candidates.push(PluginManagerCandidate::plugin(
         Arc::new(StaticNodeRegistryPlugin) as PluginRef,
-        false,
+        true,
     ));
     Ok(candidates)
 }

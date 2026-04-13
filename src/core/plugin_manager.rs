@@ -20,6 +20,7 @@ pub struct PluginManagerCandidate {
     pub manifest: PluginManifest,
     pub plugin: PluginRef,
     pub provider: Option<ProviderPluginRef>,
+    pub billing: Option<crate::core::plugin::BillingPluginRef>,
     pub resources: Vec<Resource>,
     pub default_enabled: bool,
 }
@@ -31,6 +32,7 @@ impl PluginManagerCandidate {
             manifest,
             plugin,
             provider: None,
+            billing: None,
             resources: Vec::new(),
             default_enabled,
         }
@@ -39,6 +41,7 @@ impl PluginManagerCandidate {
     pub fn provider(
         plugin: PluginRef,
         provider: ProviderPluginRef,
+        billing: Option<crate::core::plugin::BillingPluginRef>,
         resources: Vec<Resource>,
         default_enabled: bool,
     ) -> Self {
@@ -47,6 +50,7 @@ impl PluginManagerCandidate {
             manifest,
             plugin,
             provider: Some(provider),
+            billing,
             resources,
             default_enabled,
         }
@@ -403,6 +407,9 @@ impl PluginManager {
         registry.register(candidate.plugin.clone());
         if let Some(provider) = &candidate.provider {
             registry.register_provider(provider.clone());
+        }
+        if let Some(billing) = &candidate.billing {
+            registry.register_billing(candidate.manifest.id.clone(), billing.clone());
         }
         resources.extend(candidate.resources.clone());
     }

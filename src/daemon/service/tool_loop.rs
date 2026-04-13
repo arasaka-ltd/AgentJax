@@ -285,6 +285,8 @@ impl Daemon {
         for iteration in 0..=MAX_TOOL_LOOP_STEPS {
             let prompt =
                 build_tool_followup_prompt(&self.app, assembled_context, loop_messages.clone());
+            let request_started_at = Utc::now();
+            let request_started = std::time::Instant::now();
             self.record_event(
                 session_id,
                 turn_id,
@@ -379,6 +381,23 @@ impl Daemon {
                     "iteration": iteration,
                 }),
             )?;
+            if let Some(usage) = response.usage.as_ref() {
+                let latency_ms = request_started
+                    .elapsed()
+                    .as_millis()
+                    .min(u128::from(u64::MAX)) as u64;
+                self.record_usage_and_billing(
+                    session_id,
+                    task_id,
+                    turn_id,
+                    session_agent,
+                    usage,
+                    loop_messages.len() as u32 + response.items.len() as u32,
+                    request_started_at,
+                    latency_ms,
+                )
+                .await?;
+            }
             let assistant_text = response.assistant_text();
             let tool_calls = collect_tool_calls(
                 &response,

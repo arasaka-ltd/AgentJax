@@ -14,6 +14,29 @@
 - `docs/PLUGIN_SDK.md`：插件 SDK、资源层、能力模型
 - `docs/WORKSPACE_AND_CONFIG_SPEC.md`：workspace、config、state、热重载、skills
 - `docs/USAGE_BILLING_SCHEDULER_NODE_SPEC.md`：usage/billing/scheduler/node 四块扩展规范
+### 当前实现对齐说明（2026-04-13）
+当前代码已落下的最小实现：
+- usage ledger：
+  - daemon 在每次模型响应后记录 `UsageRecord`
+  - ledger 落盘到 `state/usage/ledger.json`
+  - metrics / config inspect 已可读取 usage 统计面
+- billing ledger：
+  - `BillingPlugin::estimate_billing()` 已接入 daemon
+  - OpenAI provider 已有最小正式 pricing rule map
+  - ledger 落盘到 `state/billing/ledger.json`
+- scheduler：
+  - schedule registry 落盘到 `state/schedules/*.json`
+  - daemon 有最小 interval scheduler loop
+  - 触发后会产出 `schedule_triggered -> task_started -> task_succeeded` headless task 闭环
+- node registry：
+  - runtime 会合并 `node.local` 与 `node.static_registry` 配置中的静态节点
+  - 已有 capability / label / trust level 的最小 selector
+  - node inspect 已不再是硬编码单节点返回
+
+当前仍未实现的部分：
+- provider remote billing 拉取 / reconciliation worker
+- cron / event / file-change 等完整 trigger executor
+- distributed lease / checkpoint / real remote node execution
 ---
 ## 2. 总体设计原则
 ### 2.1 核心只记录 usage facts

@@ -775,6 +775,7 @@ pub fn provider_candidate(
     Ok(PluginManagerCandidate::provider(
         plugin.clone() as PluginRef,
         plugin.clone(),
+        Some(plugin.clone()),
         plugin.provided_resources(),
         true,
     ))
@@ -858,45 +859,76 @@ impl BillingPlugin for OpenAiProviderPlugin {
             return Ok(None);
         }
 
+        let pricing = usage
+            .model_id
+            .as_deref()
+            .and_then(openai_pricing_rule_for_model)
+            .or_else(|| {
+                matches!(usage.category, UsageCategory::Embedding).then_some(OpenAiPricingRule {
+                    rule_id: "openai.embedding.generic.v2026-04-13",
+                    input_per_million: 0.02,
+                    cached_input_per_million: None,
+                    output_per_million: 0.0,
+                    confidence: BillingConfidence::Low,
+                })
+            });
+        let Some(pricing) = pricing else {
+            return Ok(None);
+        };
+
         let mut amount = 0.0_f64;
         let mut breakdown = Vec::new();
 
         match usage.category {
             UsageCategory::ModelText | UsageCategory::ModelReasoning => {
                 if let Some(input_tokens) = usage.input_tokens {
-                    let subtotal = input_tokens as f64 / 1_000_000.0 * 0.15;
+                    let subtotal = input_tokens as f64 / 1_000_000.0 * pricing.input_per_million;
                     amount += subtotal;
                     breakdown.push(BillingBreakdownItem {
                         item_type: "input_tokens".into(),
                         quantity: input_tokens.to_string(),
-                        unit_price: Some("0.15 / 1M tokens".into()),
+                        unit_price: Some(format!("{:.4} / 1M tokens", pricing.input_per_million)),
                         subtotal: format!("{subtotal:.8}"),
-                        note: Some("placeholder local estimate".into()),
+                        note: Some("standard processing estimate".into()),
+                    });
+                }
+
+                if let (Some(cached_tokens), Some(cached_rate)) =
+                    (usage.cached_tokens, pricing.cached_input_per_million)
+                {
+                    let subtotal = cached_tokens as f64 / 1_000_000.0 * cached_rate;
+                    amount += subtotal;
+                    breakdown.push(BillingBreakdownItem {
+                        item_type: "cached_input_tokens".into(),
+                        quantity: cached_tokens.to_string(),
+                        unit_price: Some(format!("{cached_rate:.4} / 1M tokens")),
+                        subtotal: format!("{subtotal:.8}"),
+                        note: Some("prompt caching estimate".into()),
                     });
                 }
 
                 if let Some(output_tokens) = usage.output_tokens {
-                    let subtotal = output_tokens as f64 / 1_000_000.0 * 0.60;
+                    let subtotal = output_tokens as f64 / 1_000_000.0 * pricing.output_per_million;
                     amount += subtotal;
                     breakdown.push(BillingBreakdownItem {
                         item_type: "output_tokens".into(),
                         quantity: output_tokens.to_string(),
-                        unit_price: Some("0.60 / 1M tokens".into()),
+                        unit_price: Some(format!("{:.4} / 1M tokens", pricing.output_per_million)),
                         subtotal: format!("{subtotal:.8}"),
-                        note: Some("placeholder local estimate".into()),
+                        note: Some("standard processing estimate".into()),
                     });
                 }
             }
             UsageCategory::Embedding => {
                 if let Some(input_tokens) = usage.input_tokens {
-                    let subtotal = input_tokens as f64 / 1_000_000.0 * 0.02;
+                    let subtotal = input_tokens as f64 / 1_000_000.0 * pricing.input_per_million;
                     amount += subtotal;
                     breakdown.push(BillingBreakdownItem {
                         item_type: "embedding_tokens".into(),
                         quantity: input_tokens.to_string(),
-                        unit_price: Some("0.02 / 1M tokens".into()),
+                        unit_price: Some(format!("{:.4} / 1M tokens", pricing.input_per_million)),
                         subtotal: format!("{subtotal:.8}"),
-                        note: Some("placeholder local estimate".into()),
+                        note: Some("generic embedding estimate".into()),
                     });
                 }
             }
@@ -918,12 +950,141 @@ impl BillingPlugin for OpenAiProviderPlugin {
             amount: format!("{amount:.8}"),
             currency: "USD".into(),
             mode: BillingMode::Estimated,
-            rule_id: Some("openai.local.placeholder.v1".into()),
-            confidence: BillingConfidence::Low,
+            rule_id: Some(pricing.rule_id.into()),
+            confidence: pricing.confidence,
             breakdown,
             generated_at: chrono::Utc::now(),
         }))
     }
+}
+
+#[derive(Debug)]
+struct OpenAiPricingRule {
+    rule_id: &'static str,
+    input_per_million: f64,
+    cached_input_per_million: Option<f64>,
+    output_per_million: f64,
+    confidence: BillingConfidence,
+}
+
+fn openai_pricing_rule_for_model(model_id: &str) -> Option<OpenAiPricingRule> {
+    let model_id = model_id.to_ascii_lowercase();
+    let rules = [
+        (
+            "gpt-5.4-mini",
+            OpenAiPricingRule {
+                rule_id: "openai.gpt-5.4-mini.standard.v2026-04-13",
+                input_per_million: 0.75,
+                cached_input_per_million: Some(0.075),
+                output_per_million: 4.50,
+                confidence: BillingConfidence::High,
+            },
+        ),
+        (
+            "gpt-5.4-nano",
+            OpenAiPricingRule {
+                rule_id: "openai.gpt-5.4-nano.standard.v2026-04-13",
+                input_per_million: 0.20,
+                cached_input_per_million: Some(0.02),
+                output_per_million: 1.25,
+                confidence: BillingConfidence::High,
+            },
+        ),
+        (
+            "gpt-5.4",
+            OpenAiPricingRule {
+                rule_id: "openai.gpt-5.4.standard.v2026-04-13",
+                input_per_million: 2.50,
+                cached_input_per_million: Some(0.25),
+                output_per_million: 15.00,
+                confidence: BillingConfidence::High,
+            },
+        ),
+        (
+            "gpt-5.3-codex",
+            OpenAiPricingRule {
+                rule_id: "openai.gpt-5.3-codex.standard.v2026-04-13",
+                input_per_million: 1.75,
+                cached_input_per_million: Some(0.175),
+                output_per_million: 14.00,
+                confidence: BillingConfidence::High,
+            },
+        ),
+        (
+            "gpt-5.3-chat-latest",
+            OpenAiPricingRule {
+                rule_id: "openai.gpt-5.3-chat.standard.v2026-04-13",
+                input_per_million: 1.75,
+                cached_input_per_million: Some(0.175),
+                output_per_million: 14.00,
+                confidence: BillingConfidence::High,
+            },
+        ),
+        (
+            "gpt-4.1-mini",
+            OpenAiPricingRule {
+                rule_id: "openai.gpt-4.1-mini.standard.v2026-04-13",
+                input_per_million: 0.40,
+                cached_input_per_million: Some(0.10),
+                output_per_million: 1.60,
+                confidence: BillingConfidence::Medium,
+            },
+        ),
+        (
+            "gpt-4.1",
+            OpenAiPricingRule {
+                rule_id: "openai.gpt-4.1.standard.v2026-04-13",
+                input_per_million: 2.00,
+                cached_input_per_million: Some(0.50),
+                output_per_million: 8.00,
+                confidence: BillingConfidence::Medium,
+            },
+        ),
+        (
+            "gpt-4o-mini",
+            OpenAiPricingRule {
+                rule_id: "openai.gpt-4o-mini.standard.v2026-04-13",
+                input_per_million: 0.15,
+                cached_input_per_million: Some(0.075),
+                output_per_million: 0.60,
+                confidence: BillingConfidence::Medium,
+            },
+        ),
+        (
+            "gpt-4o",
+            OpenAiPricingRule {
+                rule_id: "openai.gpt-4o.standard.v2026-04-13",
+                input_per_million: 2.50,
+                cached_input_per_million: Some(1.25),
+                output_per_million: 10.00,
+                confidence: BillingConfidence::Medium,
+            },
+        ),
+        (
+            "gpt-realtime-1.5",
+            OpenAiPricingRule {
+                rule_id: "openai.gpt-realtime-1.5.text.standard.v2026-04-13",
+                input_per_million: 4.00,
+                cached_input_per_million: Some(0.40),
+                output_per_million: 16.00,
+                confidence: BillingConfidence::High,
+            },
+        ),
+        (
+            "gpt-realtime-mini",
+            OpenAiPricingRule {
+                rule_id: "openai.gpt-realtime-mini.text.standard.v2026-04-13",
+                input_per_million: 0.60,
+                cached_input_per_million: Some(0.06),
+                output_per_million: 2.40,
+                confidence: BillingConfidence::High,
+            },
+        ),
+    ];
+
+    rules
+        .into_iter()
+        .find_map(|(prefix, rule)| model_id.starts_with(prefix).then_some(rule))
 }
 
 fn is_language_model(model_id: &str) -> bool {
@@ -976,7 +1137,7 @@ mod tests {
     use crate::core::BillingPlugin;
 
     #[tokio::test]
-    async fn estimate_billing_produces_breakdown_for_text_usage() {
+    async fn estimate_billing_uses_model_pricing_rule_for_text_usage() {
         let plugin = OpenAiProviderPlugin::new(OpenAiProviderConfig {
             provider_id: "openai-default".into(),
             api_key: Some("test-key".into()),
@@ -1005,7 +1166,7 @@ mod tests {
             message_count: 2,
             input_tokens: Some(2_000),
             output_tokens: Some(1_000),
-            cached_tokens: None,
+            cached_tokens: Some(500),
             reasoning_tokens: None,
             audio_seconds: None,
             image_count: None,
@@ -1029,11 +1190,27 @@ mod tests {
         assert_eq!(billing.currency, "USD");
         assert_eq!(
             billing.rule_id.as_deref(),
-            Some("openai.local.placeholder.v1")
+            Some("openai.gpt-4o-mini.standard.v2026-04-13")
         );
-        assert_eq!(billing.breakdown.len(), 2);
+        assert_eq!(billing.breakdown.len(), 3);
         assert_eq!(billing.breakdown[0].item_type, "input_tokens");
-        assert_eq!(billing.breakdown[1].item_type, "output_tokens");
-        assert_eq!(billing.amount, "0.00090000");
+        assert_eq!(billing.breakdown[1].item_type, "cached_input_tokens");
+        assert_eq!(billing.breakdown[2].item_type, "output_tokens");
+        assert_eq!(billing.amount, "0.00093750");
+        assert_eq!(billing.confidence, BillingConfidence::Medium);
+    }
+
+    #[test]
+    fn pricing_rule_matches_current_flagship_models() {
+        let gpt_54 = openai_pricing_rule_for_model("gpt-5.4").expect("gpt-5.4 rule exists");
+        assert_eq!(gpt_54.input_per_million, 2.50);
+        assert_eq!(gpt_54.cached_input_per_million, Some(0.25));
+        assert_eq!(gpt_54.output_per_million, 15.00);
+
+        let gpt_54_mini =
+            openai_pricing_rule_for_model("gpt-5.4-mini").expect("gpt-5.4-mini rule exists");
+        assert_eq!(gpt_54_mini.input_per_million, 0.75);
+        assert_eq!(gpt_54_mini.cached_input_per_million, Some(0.075));
+        assert_eq!(gpt_54_mini.output_per_million, 4.50);
     }
 }

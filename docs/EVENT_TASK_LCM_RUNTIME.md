@@ -11,6 +11,26 @@
 - `docs/CORE_OBJECT_MODEL.md` = Spec 1
 - `docs/WORKSPACE_AND_CONFIG_SPEC.md` = Spec 2
 - `docs/PLUGIN_SDK.md` = Spec 3
+### 当前实现对齐说明（2026-04-13）
+当前 runtime 已经实现的最小闭环如下：
+- `session.send` / runtime resume 会真实落：
+  - `message_received`
+  - `turn_started`
+  - `context_built`
+  - `model_called`
+  - `model_response_received`
+  - `tool_*`
+  - `task_*`
+  - `turn_succeeded` / `turn_failed`
+- `sleep` runtime control 已接入 waiting / resumed / checkpoint 事件链。
+- `summary_invalidated` / `summary_recomputed` 已能进入 LCM 状态修正链。
+- `usage_recorded` / `billing_recorded` 现已由 daemon 在模型响应后真实产出。
+- `schedule_triggered` 现已有最小执行闭环，但当前 executor 只覆盖 interval schedule，并把触发结果落为 headless task。
+
+当前仍未实现或未深化的部分：
+- 完整 retry / breaker / distributed lease
+- 非 interval trigger 的 scheduler executor
+- 多 node 分布式路由与真正远端执行
 ---
 ## 2. 核心原则
 ### 2.1 一切关键动作都应事件化

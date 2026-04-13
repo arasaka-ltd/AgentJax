@@ -764,6 +764,108 @@ impl Daemon {
             })
     }
 
+    pub(super) async fn record_usage_and_billing(
+        &self,
+        session_id: &str,
+        task_id: &str,
+        turn_id: &str,
+        session_agent: &crate::config::AgentDefinition,
+        usage: &crate::domain::ModelUsage,
+        message_count: u32,
+        started_at: chrono::DateTime<chrono::Utc>,
+        latency_ms: u64,
+    ) -> Result<(), ApiError> {
+        let record = crate::domain::UsageRecord {
+            usage_id: self.store.next_usage_id(),
+            category: usage_category_for_model(&session_agent.model),
+            provider_id: Some(session_agent.provider_id.clone()),
+            model_id: Some(session_agent.model.clone()),
+            resource_id: format!("provider:{}:model:text", session_agent.provider_id),
+            endpoint_id: Some("model.turn".into()),
+            region: None,
+            account_id: None,
+            project_id: None,
+            workspace_id: Some(self.app.runtime_config.workspace.workspace_id.clone()),
+            agent_id: Some(session_agent.agent_id.clone()),
+            session_id: Some(session_id.into()),
+            task_id: Some(task_id.into()),
+            plugin_id: None,
+            request_count: 1,
+            response_count: 1,
+            message_count,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cached_tokens: None,
+            reasoning_tokens: None,
+            audio_seconds: None,
+            image_count: None,
+            video_count: None,
+            tool_call_count: None,
+            context_window_used: Some(
+                usage.input_tokens.unwrap_or(0) + usage.output_tokens.unwrap_or(0),
+            ),
+            max_context_tier_crossed: None,
+            started_at,
+            ended_at: chrono::Utc::now(),
+            latency_ms,
+            retry_count: 0,
+        };
+        let stored = self
+            .store
+            .append_usage_record(record.clone())
+            .map_err(internal_store_error)?;
+        self.record_event(
+            session_id,
+            turn_id,
+            Some(task_id),
+            EventType::UsageRecorded,
+            json!({
+                "usage_id": stored.usage_id,
+                "provider_id": stored.provider_id,
+                "model_id": stored.model_id,
+                "input_tokens": stored.input_tokens,
+                "output_tokens": stored.output_tokens,
+                "latency_ms": stored.latency_ms,
+            }),
+        )?;
+
+        for plugin in self.app.plugin_registry.billing_plugins() {
+            let Some(mut billing) = plugin.estimate_billing(&stored).await.map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::InternalError,
+                    format!("billing estimation failed: {error}"),
+                    false,
+                )
+            })?
+            else {
+                continue;
+            };
+            billing.billing_id = self.store.next_billing_id();
+            billing.usage_id = stored.usage_id.clone();
+            let billing = self
+                .store
+                .append_billing_record(billing)
+                .map_err(internal_store_error)?;
+            self.record_event(
+                session_id,
+                turn_id,
+                Some(task_id),
+                EventType::BillingRecorded,
+                json!({
+                    "billing_id": billing.billing_id,
+                    "usage_id": billing.usage_id,
+                    "amount": billing.amount,
+                    "currency": billing.currency,
+                    "mode": billing.mode,
+                    "rule_id": billing.rule_id,
+                    "confidence": billing.confidence,
+                }),
+            )?;
+        }
+
+        Ok(())
+    }
+
     pub(super) async fn execute_tool_call(&self, tool_call: &ToolCall) -> Result<String, ApiError> {
         self.record_shell_tool_started(tool_call)?;
         self.record_event(
@@ -835,6 +937,150 @@ impl Daemon {
                 }
             });
         }
+    }
+
+    pub(super) fn spawn_schedule_executor(&self) {
+        let daemon = self.clone();
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tokio::spawn(async move {
+                loop {
+                    daemon.run_due_schedules().await;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+            });
+        }
+    }
+
+    async fn run_due_schedules(&self) {
+        let now = Utc::now();
+        let due = match self.store.due_schedules(now) {
+            Ok(records) => records,
+            Err(error) => {
+                self.push_log(format!("schedule scan failed: {error}"));
+                return;
+            }
+        };
+
+        for record in due {
+            if let Err(error) = self.execute_schedule(record, now).await {
+                self.push_log(format!("schedule execution failed: {}", error.message));
+            }
+        }
+    }
+
+    async fn execute_schedule(
+        &self,
+        record: crate::daemon::schedule_store::StoredScheduleRecord,
+        triggered_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), ApiError> {
+        let schedule = record.schedule.clone();
+        let turn_id = self.store.next_turn_id();
+        let task_id = self.store.next_task_id();
+        let selected_node = self
+            .node_registry()
+            .select(&NodeSelector {
+                required_capabilities: vec!["scheduler.tick".into()],
+                preferred_labels: std::collections::BTreeMap::from([(
+                    "scope".into(),
+                    "local".into(),
+                )]),
+                min_trust_level: Some(TrustLevel::High),
+            })
+            .into_iter()
+            .next()
+            .or_else(|| self.node_registry().list().into_iter().next());
+
+        let updated = self
+            .store
+            .mark_schedule_triggered(&schedule.schedule_id, Some(&task_id), triggered_at)
+            .map_err(internal_store_error)?;
+        let mut task = Task {
+            meta: ObjectMeta::new(
+                task_id.clone(),
+                &self.app.runtime_config.state_schema_version,
+            ),
+            task_id: task_id.clone(),
+            workspace_id: self.app.runtime_config.workspace.workspace_id.clone(),
+            agent_id: Some(self.app.runtime.default_agent().agent_id.clone()),
+            session_id: None,
+            parent_task_id: None,
+            definition_ref: Some(schedule_target_ref(&schedule.target)),
+            execution_mode: ExecutionMode::HeadlessTask,
+            status: TaskStatus::Running,
+            priority: crate::domain::TaskPriority::Normal,
+            goal: schedule_goal(&schedule),
+            checkpoint_ref: None,
+            waiting_until: None,
+            waiting_reason: None,
+            waiting_resume_hint: None,
+        };
+        self.store
+            .create_task(task.clone())
+            .map_err(internal_store_error)?;
+        self.store
+            .append_task_timeline(
+                &task_id,
+                crate::domain::TaskPhase::Scheduled,
+                TaskStatus::Running,
+                Some(&turn_id),
+                None,
+                format!("schedule {} triggered", schedule.schedule_id),
+            )
+            .map_err(internal_store_error)?;
+        self.record_event(
+            "session.default",
+            &turn_id,
+            Some(&task_id),
+            EventType::ScheduleTriggered,
+            json!({
+                "schedule_id": schedule.schedule_id,
+                "schedule_name": schedule.name,
+                "trigger": schedule.trigger,
+                "next_run_at": updated.next_run_at,
+                "selected_node_id": selected_node.as_ref().map(|node| node.node_id.clone()),
+            }),
+        )?;
+        self.record_event(
+            "session.default",
+            &turn_id,
+            Some(&task_id),
+            EventType::TaskStarted,
+            json!({
+                "task_id": task_id,
+                "execution_mode": "headless_task",
+                "goal": task.goal,
+                "definition_ref": task.definition_ref,
+            }),
+        )?;
+        task.status = TaskStatus::Succeeded;
+        task.meta.updated_at = Utc::now();
+        self.store.update_task(task).map_err(internal_store_error)?;
+        self.store
+            .append_task_timeline(
+                &task_id,
+                crate::domain::TaskPhase::Succeeded,
+                TaskStatus::Succeeded,
+                Some(&turn_id),
+                None,
+                "scheduled task executed by local scheduler",
+            )
+            .map_err(internal_store_error)?;
+        self.record_event(
+            "session.default",
+            &turn_id,
+            Some(&task_id),
+            EventType::TaskSucceeded,
+            json!({
+                "task_id": task_id,
+                "schedule_id": schedule.schedule_id,
+                "selected_node_id": selected_node.as_ref().map(|node| node.node_id.clone()),
+            }),
+        )?;
+        self.push_log(format!(
+            "schedule {} executed as headless task {}",
+            schedule.schedule_id, task_id
+        ));
+        Ok(())
     }
 
     async fn resume_ready_waiting_tasks(&self) {
@@ -1119,5 +1365,37 @@ impl Daemon {
         }
 
         Ok(())
+    }
+}
+
+fn usage_category_for_model(model_id: &str) -> crate::domain::UsageCategory {
+    if model_id.to_ascii_lowercase().starts_with('o') {
+        crate::domain::UsageCategory::ModelReasoning
+    } else {
+        crate::domain::UsageCategory::ModelText
+    }
+}
+
+fn schedule_target_ref(target: &crate::domain::TaskTarget) -> String {
+    match target {
+        crate::domain::TaskTarget::TaskRef { definition_ref } => definition_ref.clone(),
+        crate::domain::TaskTarget::SkillRef { skill_id } => format!("skill:{skill_id}"),
+        crate::domain::TaskTarget::WorkflowRef { workflow_id } => {
+            format!("workflow:{workflow_id}")
+        }
+    }
+}
+
+fn schedule_goal(schedule: &Schedule) -> String {
+    match &schedule.target {
+        crate::domain::TaskTarget::TaskRef { definition_ref } => {
+            format!("Execute scheduled task definition {definition_ref}")
+        }
+        crate::domain::TaskTarget::SkillRef { skill_id } => {
+            format!("Execute scheduled skill {skill_id}")
+        }
+        crate::domain::TaskTarget::WorkflowRef { workflow_id } => {
+            format!("Execute scheduled workflow {workflow_id}")
+        }
     }
 }

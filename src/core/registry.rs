@@ -4,7 +4,8 @@ use anyhow::{anyhow, Result};
 
 use crate::builtin::tools::ToolPlugin;
 use crate::core::plugin::{
-    BackendPluginRef, ContextPluginRef, PluginRef, ProviderPluginRef, StoragePluginRef,
+    BackendPluginRef, BillingPluginRef, ContextPluginRef, PluginRef, ProviderPluginRef,
+    StoragePluginRef,
 };
 use crate::domain::{PluginCapability, PluginManifest};
 
@@ -16,6 +17,7 @@ pub struct PluginRegistry {
     storage: BTreeMap<String, StoragePluginRef>,
     contexts: BTreeMap<String, ContextPluginRef>,
     backends: BTreeMap<String, BackendPluginRef>,
+    billing: BTreeMap<String, BillingPluginRef>,
 }
 
 impl PluginRegistry {
@@ -46,6 +48,10 @@ impl PluginRegistry {
     pub fn register_backend(&mut self, plugin: BackendPluginRef) {
         self.backends
             .insert(plugin.backend_id().to_string(), plugin);
+    }
+
+    pub fn register_billing(&mut self, plugin_id: impl Into<String>, plugin: BillingPluginRef) {
+        self.billing.insert(plugin_id.into(), plugin);
     }
 
     pub fn manifests(&self) -> Vec<PluginManifest> {
@@ -105,6 +111,10 @@ impl PluginRegistry {
 
     pub fn context_plugins(&self) -> Vec<ContextPluginRef> {
         self.contexts.values().cloned().collect()
+    }
+
+    pub fn billing_plugins(&self) -> Vec<BillingPluginRef> {
+        self.billing.values().cloned().collect()
     }
 
     pub fn validate_dependencies(&self) -> Result<()> {

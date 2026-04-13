@@ -318,6 +318,7 @@ pub type ProviderPluginRef = Arc<dyn ProviderPlugin>;
 pub type StoragePluginRef = Arc<dyn StoragePlugin>;
 pub type ContextPluginRef = Arc<dyn ContextPlugin>;
 pub type BackendPluginRef = Arc<dyn BackendPlugin>;
+pub type BillingPluginRef = Arc<dyn BillingPlugin>;
 
 #[derive(Clone)]
 pub struct PluginHost {

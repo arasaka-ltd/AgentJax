@@ -21,7 +21,9 @@ pub mod usage;
 
 pub use agent::{Agent, AgentStatus};
 pub use artifact::{Artifact, ArtifactProducer, RetentionPolicy};
-pub use billing::{BillingBreakdownItem, BillingConfidence, BillingMode, BillingRecord};
+pub use billing::{
+    BillingBreakdownItem, BillingConfidence, BillingMode, BillingReconciliation, BillingRecord,
+};
 pub use context::{
     Confidence, ContextBlock, ContextBlockKind, ContextProjection, ContextSource, Freshness,
 };
@@ -31,7 +33,7 @@ pub use model_output::{
     RuntimeControlItem, SleepRequest, ToolCallItem, ToolResultItem,
 };
 pub use model_stream::ModelStreamEvent;
-pub use node::{Node, NodeKind, NodeStatus, TrustLevel};
+pub use node::{Node, NodeKind, NodeSelector, NodeStatus, TrustLevel};
 pub use object_meta::ObjectMeta;
 pub use plugin::{
     BillingCapability, ChannelCapability, CommandCapability, ContextCapability, HookCapability,

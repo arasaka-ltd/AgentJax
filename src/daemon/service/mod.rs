@@ -47,9 +47,9 @@ use crate::{
     daemon::store::DaemonStore,
     domain::{
         Agent, AgentStatus, AutonomyPolicy, ContextAssemblyPurpose, EventType, ExecutionMode,
-        ModelOutputItem, ModelTurnOutput, Node, NodeKind, NodeStatus, ObjectMeta, PluginDescriptor,
-        PluginStatus, Schedule, Session, SessionModelTarget, Task, TaskStatus, ToolCall,
-        ToolCallItem, ToolCaller, ToolResultItem, TrustLevel,
+        ModelOutputItem, ModelTurnOutput, NodeSelector, ObjectMeta, PluginDescriptor, PluginStatus,
+        Schedule, Session, SessionModelTarget, Task, TaskStatus, ToolCall, ToolCallItem,
+        ToolCaller, ToolResultItem, TrustLevel,
     },
 };
 
@@ -66,7 +66,6 @@ pub struct Daemon {
 
 #[derive(Default)]
 struct ControlPlaneState {
-    schedules: BTreeMap<String, Schedule>,
     subscriptions: BTreeMap<String, RegisteredSubscription>,
     streams: BTreeMap<String, RegisteredStream>,
     logs: Vec<String>,
@@ -118,6 +117,7 @@ impl Daemon {
             control: Arc::new(Mutex::new(ControlPlaneState::default())),
         };
         daemon.spawn_waiting_task_scheduler();
+        daemon.spawn_schedule_executor();
         Ok(daemon)
     }
 
@@ -435,6 +435,93 @@ mod tests {
         assert_eq!(phases.last(), Some(&StreamPhase::End));
         assert!(events.iter().any(|event| event == "turn.started"));
         assert!(events.iter().any(|event| event == "stream.completed"));
+    }
+
+    #[tokio::test]
+    async fn session_send_records_usage_ledger_entries() {
+        let harness = TestHarness::new("usage-ledger");
+        let daemon = harness.daemon.clone();
+
+        let dispatch = daemon
+            .handle_request(request(
+                "req_usage_send",
+                ApiMethod::SessionSend,
+                SessionSendRequest {
+                    session_id: "session.default".into(),
+                    message: crate::api::SessionMessage::user("record usage"),
+                    stream: false,
+                },
+            ))
+            .await;
+        let _: SessionSendResponse = ok_result(&dispatch.response);
+
+        let usage_records = daemon
+            .store
+            .list_usage_records()
+            .expect("usage ledger list failed");
+        assert_eq!(usage_records.len(), 1);
+        assert_eq!(
+            usage_records[0].provider_id.as_deref(),
+            Some("mock-default")
+        );
+        assert_eq!(usage_records[0].input_tokens, Some(64));
+        assert_eq!(usage_records[0].output_tokens, Some(16));
+    }
+
+    #[tokio::test]
+    async fn interval_schedule_executes_into_headless_task() {
+        let harness = TestHarness::new("schedule-exec");
+        let daemon = harness.daemon.clone();
+        let schedule = Schedule {
+            meta: ObjectMeta::new("schedule.interval", "state.v1"),
+            schedule_id: "schedule.interval".into(),
+            name: "interval-check".into(),
+            trigger: TaskTrigger::Interval { seconds: 0 },
+            target: TaskTarget::WorkflowRef {
+                workflow_id: "workflow.nightly".into(),
+            },
+            enabled: true,
+        };
+
+        let created_dispatch = daemon
+            .handle_request(request(
+                "req_schedule_exec_create",
+                ApiMethod::ScheduleCreate,
+                ScheduleCreateRequest {
+                    schedule: schedule.clone(),
+                },
+            ))
+            .await;
+        let _: ScheduleGetResponse = ok_result(&created_dispatch.response);
+
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+        let tasks = daemon.store.list_tasks().expect("task list failed");
+        let scheduled_task = tasks
+            .into_iter()
+            .find(|record| {
+                record.task.definition_ref.as_deref() == Some("workflow:workflow.nightly")
+            })
+            .expect("expected scheduled task to execute");
+        assert_eq!(
+            scheduled_task.task.execution_mode,
+            ExecutionMode::HeadlessTask
+        );
+        assert_eq!(scheduled_task.task.status, TaskStatus::Succeeded);
+
+        let events = daemon
+            .store
+            .get_session("session.default")
+            .expect("session load failed")
+            .expect("default session missing")
+            .events;
+        assert!(events
+            .iter()
+            .any(|event| event.event_type == EventType::ScheduleTriggered));
+        assert!(events.iter().any(|event| {
+            event.event_type == EventType::ScheduleTriggered
+                && event.payload["selected_node_id"].as_str() == Some("node.local")
+        }));
     }
 
     fn request<T>(id: &str, method: ApiMethod, params: T) -> RequestEnvelope

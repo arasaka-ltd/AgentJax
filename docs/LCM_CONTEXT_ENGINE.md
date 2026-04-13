@@ -17,6 +17,31 @@
 - `docs/RAG_KNOWLEDGE_MEMORY_SPEC.md`：定义 RAG / Knowledge / Memory 分层
 - `docs/EVENT_TASK_LCM_RUNTIME.md`：定义 event / task / LCM runtime 总体契约
 - `docs/LCM_CONTEXT_ENGINE.md`：定义原生上下文引擎本体
+### 当前实现对齐说明（2026-04-13）
+当前代码中的 `WorkspaceContextEngine` 已经落了一个可验证最小闭环，但还不是本 spec 的全量终态。
+
+当前真实实现边界：
+- `EventStore` 与 `ProjectionStore` 目前是进程内内存实现，不是独立 SQLite 子系统。
+- `assemble_context()` 已按 stable blocks -> runtime task state -> checkpoint -> selected summaries -> fresh tail -> optional implicit retrieval 的顺序装配。
+- compaction 当前是 message-body-first：
+  - 只从 `message_received(user)` 和 `turn_succeeded(assistant_message)` 中提取 message body。
+  - leaf summary 固定按 4 条 message 分块。
+  - condensed summary 仅做一层二合一折叠。
+  - 最终默认最多选 3 个 summary node 进入上下文。
+- checkpoint summary 已真实存在，并从 task/runtime 事件里提炼：
+  - active task ids
+  - latest goal
+  - blockers
+  - pending artifacts
+  - next recommended action
+  - assumptions / risks
+- summary invalidation / recompute 已能被 `summary_invalidated` / `summary_recomputed` 事件驱动，但目前是最小状态切换，不含后台重算 worker。
+- `build_resume_pack()` 已从上述派生状态生成 resume-first 数据包。
+
+当前仍未实现的部分：
+- 持久化 `summaries / checkpoints / compaction_runs / assembly_snapshots`
+- 独立 expander / grep / describe 平面
+- 自动 compaction worker 与全量 recompute pipeline
 ---
 ## 2. Context Engine 的职责边界
 ### 2.1 Context Engine 负责什么

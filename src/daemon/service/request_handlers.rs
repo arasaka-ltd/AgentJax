@@ -144,6 +144,47 @@ impl Daemon {
                     )
                 })?
             }
+            "usage" => serde_json::to_value(
+                self.store
+                    .list_usage_records()
+                    .map_err(internal_store_error)?,
+            )
+            .map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::InternalError,
+                    format!("usage inspect serialization failed: {error}"),
+                    false,
+                )
+            })?,
+            "billing" => serde_json::to_value(
+                self.store
+                    .list_billing_records()
+                    .map_err(internal_store_error)?,
+            )
+            .map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::InternalError,
+                    format!("billing inspect serialization failed: {error}"),
+                    false,
+                )
+            })?,
+            "schedules" => {
+                serde_json::to_value(self.store.list_schedules().map_err(internal_store_error)?)
+                    .map_err(|error| {
+                        ApiError::new(
+                            ApiErrorCode::InternalError,
+                            format!("schedule inspect serialization failed: {error}"),
+                            false,
+                        )
+                    })?
+            }
+            "nodes" => serde_json::to_value(self.node_registry().list()).map_err(|error| {
+                ApiError::new(
+                    ApiErrorCode::InternalError,
+                    format!("node inspect serialization failed: {error}"),
+                    false,
+                )
+            })?,
             other => {
                 return Err(ApiError::new(
                     ApiErrorCode::InvalidRequest,
@@ -469,14 +510,17 @@ impl Daemon {
     }
 
     fn handle_node_list(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        let node = self.default_node();
+        let nodes = self.node_registry().list();
         Ok((
             self.serialize(NodeListResponse {
-                items: vec![NodeListItem {
-                    node_id: node.node_id,
-                    status: node.status,
-                    capabilities: node.capabilities,
-                }],
+                items: nodes
+                    .into_iter()
+                    .map(|node| NodeListItem {
+                        node_id: node.node_id,
+                        status: node.status,
+                        capabilities: node.capabilities,
+                    })
+                    .collect(),
             })?,
             Vec::new(),
         ))
@@ -486,23 +530,24 @@ impl Daemon {
         &self,
         params: NodeGetRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        let node = self.default_node();
-        if params.node_id != node.node_id {
-            return Err(node_not_found());
-        }
+        let node = self
+            .node_registry()
+            .get(&params.node_id)
+            .ok_or_else(node_not_found)?;
         Ok((self.serialize(NodeGetResponse { node })?, Vec::new()))
     }
 
     fn handle_schedule_list(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        let schedules = self.control.lock().expect("control plane lock poisoned");
-        let items = schedules
-            .schedules
-            .values()
-            .map(|schedule| ScheduleListItem {
-                schedule_id: schedule.schedule_id.clone(),
-                kind: schedule_kind(schedule),
-                enabled: schedule.enabled,
-                next_run_at: None,
+        let items = self
+            .store
+            .list_schedules()
+            .map_err(internal_store_error)?
+            .into_iter()
+            .map(|record| ScheduleListItem {
+                schedule_id: record.schedule.schedule_id.clone(),
+                kind: schedule_kind(&record.schedule),
+                enabled: record.schedule.enabled,
+                next_run_at: record.next_run_at,
             })
             .collect();
         Ok((self.serialize(ScheduleListResponse { items })?, Vec::new()))
@@ -512,10 +557,14 @@ impl Daemon {
         &self,
         params: ScheduleCreateRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        let mut control = self.control.lock().expect("control plane lock poisoned");
-        control
-            .schedules
-            .insert(params.schedule.schedule_id.clone(), params.schedule.clone());
+        let record = self
+            .store
+            .upsert_schedule(params.schedule.clone())
+            .map_err(internal_store_error)?;
+        self.push_log(format!(
+            "schedule created: {} next_run_at={:?}",
+            record.schedule.schedule_id, record.next_run_at
+        ));
         Ok((
             self.serialize(ScheduleGetResponse {
                 schedule: params.schedule,
@@ -528,13 +577,22 @@ impl Daemon {
         &self,
         params: ScheduleUpdateRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
-        let mut control = self.control.lock().expect("control plane lock poisoned");
-        if !control.schedules.contains_key(&params.schedule.schedule_id) {
+        if self
+            .store
+            .get_schedule(&params.schedule.schedule_id)
+            .map_err(internal_store_error)?
+            .is_none()
+        {
             return Err(schedule_not_found());
         }
-        control
-            .schedules
-            .insert(params.schedule.schedule_id.clone(), params.schedule.clone());
+        let record = self
+            .store
+            .upsert_schedule(params.schedule.clone())
+            .map_err(internal_store_error)?;
+        self.push_log(format!(
+            "schedule updated: {} next_run_at={:?}",
+            record.schedule.schedule_id, record.next_run_at
+        ));
         Ok((
             self.serialize(ScheduleGetResponse {
                 schedule: params.schedule,
@@ -548,14 +606,13 @@ impl Daemon {
         params: ScheduleDeleteRequest,
     ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
         let removed = self
-            .control
-            .lock()
-            .expect("control plane lock poisoned")
-            .schedules
-            .remove(&params.schedule_id);
+            .store
+            .delete_schedule(&params.schedule_id)
+            .map_err(internal_store_error)?;
         if removed.is_none() {
             return Err(schedule_not_found());
         }
+        self.push_log(format!("schedule deleted: {}", params.schedule_id));
         Ok((self.serialize(json!({ "accepted": true }))?, Vec::new()))
     }
 
@@ -706,30 +763,36 @@ impl Daemon {
     fn handle_metrics_snapshot(&self) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
         let task_count = self.store.list_tasks().map_err(internal_store_error)?.len();
         let schedule_count = self
-            .control
-            .lock()
-            .expect("control plane lock poisoned")
-            .schedules
+            .store
+            .list_schedules()
+            .map_err(internal_store_error)?
             .len();
         let session_count = self
             .store
             .list_sessions()
             .map_err(internal_store_error)?
             .len();
+        let node_count = self.node_registry().list().len();
+        let usage_summary = self.store.usage_summary().map_err(internal_store_error)?;
         Ok((
             self.serialize(MetricsSnapshotResponse {
                 counters: json!({
                     "sessions_total": session_count,
                     "tasks_total": task_count,
                     "schedules_total": schedule_count,
+                    "nodes_total": node_count,
                     "plugins_total": self.app.plugin_manager.plugin_count(),
+                    "usage_records_total": usage_summary.records_total,
                 }),
                 gauges: json!({
                     "runtime_ready": self.store.ready(),
                     "runtime_draining": self.store.draining(),
+                    "usage_estimated_usd_total": usage_summary.estimated_usd_total,
                 }),
                 histograms: json!({
                     "context_events_published": self.app.event_bus.snapshot().len(),
+                    "usage_input_tokens_total": usage_summary.input_tokens_total,
+                    "usage_output_tokens_total": usage_summary.output_tokens_total,
                 }),
             })?,
             Vec::new(),
