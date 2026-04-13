@@ -14,7 +14,7 @@ use crate::{
         SessionSendResponse,
     },
     bootstrap::bootstrap_application,
-    config::{ConfigLoader, InitMode, LlmProviderConfig},
+    config::{ConfigLoader, InitMode, OpenAiProviderConfig},
     daemon::Daemon,
     plugins::openai::{OpenAiModelCatalog, OpenAiProviderAdapter},
     transport::{unix::UnixSocketClient, unix::UnixSocketServer, websocket::WebSocketServer},
@@ -217,19 +217,18 @@ async fn run_provider(command: ProviderCommand) -> Result<()> {
                 .llm
                 .providers
                 .iter()
-                .map(|provider| match provider {
-                    LlmProviderConfig::OpenAi(config) => ProviderRow {
-                        provider_id: config.provider_id.clone(),
-                        kind: "openai".into(),
-                        base_url: config.base_url.clone(),
-                        api_key_env: Some(config.api_key_env.clone()),
-                    },
-                    LlmProviderConfig::Mock(config) => ProviderRow {
-                        provider_id: config.provider_id.clone(),
-                        kind: "mock".into(),
-                        base_url: None,
-                        api_key_env: None,
-                    },
+                .map(|provider| {
+                    let openai = if provider.kind() == "openai" {
+                        provider.settings_as::<OpenAiProviderConfig>().ok()
+                    } else {
+                        None
+                    };
+                    ProviderRow {
+                        provider_id: provider.provider_id.clone(),
+                        kind: provider.kind.clone(),
+                        base_url: openai.as_ref().and_then(|config| config.base_url.clone()),
+                        api_key_env: openai.map(|config| config.api_key_env),
+                    }
                 })
                 .collect::<Vec<_>>();
             print_json(&rows)
@@ -323,12 +322,14 @@ fn openai_adapter_from_loaded(
         .llm
         .providers
         .iter()
-        .find_map(|provider| match provider {
-            LlmProviderConfig::OpenAi(config) if config.provider_id == provider_id => {
-                Some(OpenAiProviderAdapter::new(config.clone()))
+        .find_map(|provider| {
+            if provider.provider_id != provider_id || provider.kind() != "openai" {
+                return None;
             }
-            LlmProviderConfig::Mock(_) => None,
-            _ => None,
+            provider
+                .settings_as_resolved::<OpenAiProviderConfig>(&loaded.runtime_config.config_root)
+                .ok()
+                .map(OpenAiProviderAdapter::new)
         })
         .ok_or_else(|| anyhow!("provider not found: {provider_id}"))
 }

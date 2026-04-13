@@ -5,6 +5,7 @@ pub mod paths;
 pub mod plugins;
 pub mod provider;
 pub mod runtime;
+pub mod secrets;
 pub mod snapshot;
 pub mod validator;
 pub mod workspace;
@@ -14,7 +15,7 @@ pub use migrator::{ConfigMigrationReport, MigrationStep};
 pub use normalizer::NormalizedConfig;
 pub use paths::{ConfigRoot, RuntimePaths, WorkspacePaths};
 pub use plugins::PluginsConfig;
-pub use provider::{LlmProviderConfig, OpenAiProviderConfig};
+pub use provider::{LlmProviderConfig, MockProviderConfig, OpenAiProviderConfig};
 pub use runtime::{
     AgentDefinition, AgentRuntimeConfig, LlmRuntimeConfig, ModelCatalogSnapshot, ModelInfoSnapshot,
     ProviderModelCatalog, RuntimeConfig,

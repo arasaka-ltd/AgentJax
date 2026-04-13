@@ -3,9 +3,11 @@ use std::{pin::Pin, sync::Arc};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::{stream, Stream};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 use crate::builtin::tools::{ToolDescriptor, ToolRegistry};
-use crate::config::{AgentDefinition, RuntimeConfig};
+use crate::config::{secrets::resolve_secret_refs, AgentDefinition, RuntimeConfig};
 use crate::core::{
     EventBus, EventStore, HookBus, PluginRegistry, ResourceRegistry, SessionStore,
     WorkspaceRuntimeHost,
@@ -151,6 +153,7 @@ impl KnowledgeClient {
 #[derive(Clone)]
 pub struct PluginContext {
     pub runtime_config: RuntimeConfig,
+    pub config: PluginConfigHandle,
     pub workspace_runtime: WorkspaceRuntimeHost,
     pub workspace: WorkspaceHandle,
     pub session: SessionHandle,
@@ -162,6 +165,46 @@ pub struct PluginContext {
     pub knowledge: KnowledgeClient,
     pub events: EventBus,
     pub hooks: HookBus,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PluginConfigHandle {
+    plugin_id: Option<String>,
+    raw: Option<Value>,
+    config_root: std::path::PathBuf,
+}
+
+impl PluginConfigHandle {
+    pub fn new(
+        plugin_id: Option<String>,
+        raw: Option<Value>,
+        config_root: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            plugin_id,
+            raw,
+            config_root,
+        }
+    }
+
+    pub fn plugin_id(&self) -> Option<&str> {
+        self.plugin_id.as_deref()
+    }
+
+    pub fn raw(&self) -> Option<&Value> {
+        self.raw.as_ref()
+    }
+
+    pub fn get<T>(&self) -> Result<Option<T>>
+    where
+        T: DeserializeOwned,
+    {
+        let Some(raw) = &self.raw else {
+            return Ok(None);
+        };
+        let resolved = resolve_secret_refs(raw.clone(), &self.config_root)?;
+        Ok(Some(serde_json::from_value(resolved)?))
+    }
 }
 
 #[async_trait]
@@ -326,11 +369,17 @@ impl PluginHost {
         &self,
         runtime_config: RuntimeConfig,
         workspace_runtime: WorkspaceRuntimeHost,
+        plugin_id: Option<String>,
         session_id: Option<String>,
         turn_id: Option<String>,
     ) -> PluginContext {
+        let config_root = runtime_config.config_root.clone();
+        let raw_config = plugin_id
+            .as_ref()
+            .and_then(|plugin_id| runtime_config.plugins.config_fragment(plugin_id).cloned());
         PluginContext {
             runtime_config,
+            config: PluginConfigHandle::new(plugin_id, raw_config, config_root),
             workspace: WorkspaceHandle {
                 runtime: workspace_runtime.clone(),
             },
@@ -395,6 +444,7 @@ impl PluginHost {
             let ctx = self.build_context(
                 runtime_config.clone(),
                 workspace_runtime.clone(),
+                Some(manifest.id.clone()),
                 None,
                 None,
             );

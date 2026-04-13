@@ -3,7 +3,10 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::builtin::tools::ToolRegistry;
-use crate::config::{ConfigRoot, RuntimeConfig, RuntimeConfigSnapshot, WorkspaceIdentityPack};
+use crate::config::{
+    ConfigRoot, MockProviderConfig, OpenAiProviderConfig, RuntimeConfig, RuntimeConfigSnapshot,
+    WorkspaceIdentityPack,
+};
 use crate::context_engine::{ContextEngine, WorkspaceContextEngine};
 use crate::core::{
     ApplicationRuntime, EventBus, HookBus, PluginHost, PluginManager, PluginManagerCandidate,
@@ -76,7 +79,7 @@ impl Application {
         let hook_bus = HookBus::default();
         let tool_registry = ToolRegistry::builtins();
 
-        for candidate in plugin_candidates(&runtime_config) {
+        for candidate in plugin_candidates(&runtime_config)? {
             plugin_manager.discover(candidate);
         }
         plugin_manager.initialize(
@@ -126,12 +129,14 @@ impl Application {
     }
 }
 
-fn plugin_candidates(runtime_config: &RuntimeConfig) -> Vec<PluginManagerCandidate> {
+fn plugin_candidates(runtime_config: &RuntimeConfig) -> Result<Vec<PluginManagerCandidate>> {
     let mut candidates = Vec::new();
 
     for provider in &runtime_config.agent_runtime.llm.providers {
-        match provider {
-            crate::config::LlmProviderConfig::OpenAi(config) => {
+        match provider.kind() {
+            "openai" => {
+                let config: OpenAiProviderConfig =
+                    provider.settings_as_resolved(&runtime_config.config_root)?;
                 let plugin = Arc::new(OpenAiProviderPlugin::new(config.clone()));
                 candidates.push(PluginManagerCandidate::provider(
                     plugin.clone() as PluginRef,
@@ -140,7 +145,9 @@ fn plugin_candidates(runtime_config: &RuntimeConfig) -> Vec<PluginManagerCandida
                     true,
                 ));
             }
-            crate::config::LlmProviderConfig::Mock(config) => {
+            "mock" => {
+                let config: MockProviderConfig =
+                    provider.settings_as_resolved(&runtime_config.config_root)?;
                 let plugin = Arc::new(crate::plugins::mock::MockProviderPlugin::new(
                     config.clone(),
                 ));
@@ -151,6 +158,7 @@ fn plugin_candidates(runtime_config: &RuntimeConfig) -> Vec<PluginManagerCandida
                     true,
                 ));
             }
+            _ => {}
         }
     }
 
@@ -166,5 +174,5 @@ fn plugin_candidates(runtime_config: &RuntimeConfig) -> Vec<PluginManagerCandida
         Arc::new(StaticNodeRegistryPlugin) as PluginRef,
         false,
     ));
-    candidates
+    Ok(candidates)
 }

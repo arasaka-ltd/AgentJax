@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::{
     migrator::ConfigMigrator,
@@ -64,7 +65,11 @@ impl Default for ProvidersLlmConfig {
     fn default() -> Self {
         Self {
             default_provider_id: "openai-default".into(),
-            providers: vec![LlmProviderConfig::OpenAi(Default::default())],
+            providers: vec![LlmProviderConfig::new(
+                "openai-default",
+                "openai",
+                crate::config::OpenAiProviderConfig::default(),
+            )],
         }
     }
 }
@@ -123,6 +128,8 @@ pub(crate) struct PluginsTomlConfig {
     pub policy_flags: BTreeMap<String, bool>,
     #[serde(default)]
     pub reload_hints: BTreeMap<String, String>,
+    #[serde(default, skip)]
+    pub fragments: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -185,6 +192,7 @@ impl ConfigLoader {
             &config_root.plugins_config,
             &PluginsTomlConfig {
                 schema_version: Some(CURRENT_CONFIG_SCHEMA_VERSION.into()),
+                fragments: BTreeMap::new(),
                 ..PluginsTomlConfig::default()
             },
         )?;
@@ -342,10 +350,14 @@ impl ConfigLoader {
         Self::initialize_at(config_root, runtime_root, workspace_root, InitMode::Minimal)?;
 
         let config_root = ConfigRoot::new(config_root);
+        let mut plugins: PluginsTomlConfig =
+            toml::from_str(&fs::read_to_string(&config_root.plugins_config)?)?;
+        plugins.fragments = load_plugin_fragments(&config_root.root, &plugins.config_refs)?;
+
         Ok(ParsedConfigBundle {
             core: toml::from_str(&fs::read_to_string(&config_root.core_config)?)?,
             providers: toml::from_str(&fs::read_to_string(&config_root.providers_config)?)?,
-            plugins: toml::from_str(&fs::read_to_string(&config_root.plugins_config)?)?,
+            plugins,
             models: toml::from_str(&fs::read_to_string(&config_root.models_config)?)?,
             resources: toml::from_str(&fs::read_to_string(&config_root.resources_config)?)?,
             daemon: toml::from_str(&fs::read_to_string(&config_root.daemon_config)?)?,
@@ -366,4 +378,40 @@ fn write_toml_if_missing<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         fs::write(path, toml::to_string_pretty(value)?)?;
     }
     Ok(())
+}
+
+fn load_plugin_fragments(
+    config_root: &Path,
+    config_refs: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, Value>> {
+    config_refs
+        .iter()
+        .map(|(plugin_id, config_ref)| {
+            Ok((
+                plugin_id.clone(),
+                load_fragment_value(config_root, config_ref)?,
+            ))
+        })
+        .collect()
+}
+
+fn load_fragment_value(config_root: &Path, config_ref: &str) -> Result<Value> {
+    let path = resolve_fragment_path(config_root, config_ref);
+    let raw = fs::read_to_string(&path)?;
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("json") => Ok(serde_json::from_str(&raw)?),
+        _ => {
+            let value: toml::Value = toml::from_str(&raw)?;
+            Ok(serde_json::to_value(value)?)
+        }
+    }
+}
+
+pub(crate) fn resolve_fragment_path(config_root: &Path, config_ref: &str) -> PathBuf {
+    let path = Path::new(config_ref);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        config_root.join(path)
+    }
 }

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde_json::json;
 
 use crate::{
     core::Plugin,
@@ -15,7 +16,15 @@ impl Plugin for TelegramChannelPlugin {
             id: "channel.telegram".into(),
             version: "0.1.0".into(),
             capabilities: vec![PluginCapability::Channel(ChannelCapability::Telegram)],
-            config_schema: None,
+            config_schema: Some(json!({
+                "type": "object",
+                "properties": {
+                    "bot_token": { "type": "string", "minLength": 1 },
+                    "webhook_url": { "type": "string", "minLength": 1 },
+                    "parse_mode": { "type": "string" }
+                },
+                "additionalProperties": true
+            })),
             required_permissions: vec![Permission::EmitEvents],
             dependencies: Vec::new(),
             optional_dependencies: Vec::new(),

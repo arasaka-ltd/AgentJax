@@ -326,7 +326,26 @@
 执行前先读：
 - `docs/CONFIG_MANAGER_SPEC.md`
 - `docs/WORKSPACE_AND_CONFIG_SPEC.md`
+- `docs/PLUGIN_REFACTOR_PLAN.md`
 
+- [x] **Extensible Provider Configuration Refactor**:
+  - 将 `src/config/provider.rs` 中的 `LlmProviderConfig` 从硬编码 enum 重构为通用结构体（`provider_id`, `kind`, `settings: Value`）。
+  - 支持插件动态注册为 Provider，并解耦核心 loader 对特定 Provider 实现（如 OpenAI）的编译期依赖。
+- [x] **Unified Plugin Configuration Loading**:
+  - 增强 `ConfigLoader`，使其能自动加载并解析 `plugins.toml` 中 `config_refs` 指向的 fragment 文件。
+  - 将加载后的配置以 `serde_json::Value` 形式存入 `RuntimeConfigSnapshot`。
+- [x] **Typed Configuration Access in PluginContext**:
+  - 在 `PluginContext` 中提供获取插件专属配置的方法（如 `ctx.config.get::<T>()`），自动处理反序列化。
+  - 确保插件作者无需手动处理文件读取、环境引用解析等通用逻辑。
+- [x] **Schema-Driven Validation**:
+  - 在 `ConfigValidator` 中引入基于 `PluginManifest.config_schema` 的插件配置校验逻辑。
+  - 在 bootstrap 或 reload 阶段拦截非法配置，避免运行时崩溃。
+- [x] **Secret Reference Resolution**:
+  - 在配置加载链中正式集成 `env:VAR` 或 `file:PATH` 格式的密钥引用解析。
+  - 确保归一化快照中不包含明文 secret，仅在插件运行时解引用。
+- [x] **Reload Plan Generation**:
+  - 实现新旧配置快照的语义级 diff。
+  - 根据变更类型（HotReload / Swap / Restart）生成明确的 reload 计划。
 
 ## Batch 13: LCM / Context Engine Deepening
 执行前先读：

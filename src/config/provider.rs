@@ -1,18 +1,111 @@
-use anyhow::{anyhow, Result};
-use serde::{Deserialize, Serialize};
+use std::path::Path;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum LlmProviderConfig {
-    OpenAi(OpenAiProviderConfig),
-    Mock(MockProviderConfig),
+use anyhow::{anyhow, Result};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
+
+use crate::config::secrets::resolve_secret_refs;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LlmProviderConfig {
+    pub provider_id: String,
+    pub kind: String,
+    pub settings: Value,
 }
 
 impl LlmProviderConfig {
+    pub fn new(
+        provider_id: impl Into<String>,
+        kind: impl Into<String>,
+        settings: impl Serialize,
+    ) -> Self {
+        Self {
+            provider_id: provider_id.into(),
+            kind: kind.into(),
+            settings: serde_json::to_value(settings).expect("provider settings must serialize"),
+        }
+    }
+
     pub fn provider_id(&self) -> &str {
-        match self {
-            Self::OpenAi(config) => &config.provider_id,
-            Self::Mock(config) => &config.provider_id,
+        &self.provider_id
+    }
+
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    pub fn settings_as<T>(&self) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        Ok(serde_json::from_value(self.settings.clone())?)
+    }
+
+    pub fn settings_as_resolved<T>(&self, config_root: &Path) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        Ok(serde_json::from_value(resolve_secret_refs(
+            self.settings.clone(),
+            config_root,
+        )?)?)
+    }
+}
+
+impl Serialize for LlmProviderConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(Some(3))?;
+        map.serialize_entry("provider_id", &self.provider_id)?;
+        map.serialize_entry("kind", &self.kind)?;
+        map.serialize_entry("settings", &self.settings)?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for LlmProviderConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct GenericProviderConfig {
+            provider_id: String,
+            kind: String,
+            #[serde(default)]
+            settings: Value,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum LegacyProviderConfig {
+            OpenAi(OpenAiProviderConfig),
+            Mock(MockProviderConfig),
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Generic(GenericProviderConfig),
+            Legacy(LegacyProviderConfig),
+        }
+
+        match Repr::deserialize(deserializer)? {
+            Repr::Generic(config) => Ok(Self {
+                provider_id: config.provider_id,
+                kind: config.kind,
+                settings: config.settings,
+            }),
+            Repr::Legacy(LegacyProviderConfig::OpenAi(config)) => {
+                Ok(Self::new(config.provider_id.clone(), "openai", config))
+            }
+            Repr::Legacy(LegacyProviderConfig::Mock(config)) => {
+                Ok(Self::new(config.provider_id.clone(), "mock", config))
+            }
         }
     }
 }

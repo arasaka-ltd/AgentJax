@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -6,6 +8,7 @@ use super::{
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeConfig {
+    pub config_root: PathBuf,
     pub app_name: String,
     pub runtime_paths: RuntimePaths,
     pub workspace: WorkspaceConfig,
@@ -22,11 +25,13 @@ pub struct RuntimeConfig {
 
 impl RuntimeConfig {
     pub fn new(
+        config_root: impl Into<PathBuf>,
         app_name: impl Into<String>,
         runtime_paths: RuntimePaths,
         workspace: WorkspaceConfig,
     ) -> Self {
         Self {
+            config_root: config_root.into(),
             app_name: app_name.into(),
             runtime_paths,
             workspace,
@@ -86,7 +91,11 @@ impl Default for LlmRuntimeConfig {
     fn default() -> Self {
         Self {
             default_provider_id: "openai-default".into(),
-            providers: vec![LlmProviderConfig::OpenAi(OpenAiProviderConfig::default())],
+            providers: vec![LlmProviderConfig::new(
+                "openai-default",
+                "openai",
+                OpenAiProviderConfig::default(),
+            )],
             model_catalog: ModelCatalogSnapshot::default(),
         }
     }

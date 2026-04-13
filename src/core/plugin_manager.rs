@@ -436,6 +436,7 @@ impl PluginManager {
             let ctx = host.build_context(
                 runtime_config.clone(),
                 workspace_runtime.clone(),
+                Some(plugin_id.to_string()),
                 None,
                 None,
             );
