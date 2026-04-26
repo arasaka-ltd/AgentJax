@@ -1,11 +1,11 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_stream::try_stream;
 use async_trait::async_trait;
 use reqwest::header::{
-    HeaderMap as ReqwestHeaderMap, HeaderValue as ReqwestHeaderValue, AUTHORIZATION,
+    AUTHORIZATION, HeaderMap as ReqwestHeaderMap, HeaderValue as ReqwestHeaderValue,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{
     builtin::tools::ToolDefinition,
@@ -14,9 +14,11 @@ use crate::{
         ProviderModelCatalog,
     },
     core::{
-        plugin::{stream_model_turn, ModelEventStream, ProviderPromptRequest},
         BillingPlugin, Plugin, PluginContext, PluginManagerCandidate, PluginRef, ProviderPlugin,
         ResourceProviderPlugin,
+        plugin::{
+            ModelEventStream, ProviderPromptMessage, ProviderPromptRequest, stream_model_turn,
+        },
     },
     domain::{
         AssistantTextItem, BillingBreakdownItem, BillingCapability, BillingConfidence, BillingMode,
@@ -35,6 +37,10 @@ pub struct OpenAiProviderConfig {
     pub base_url: Option<String>,
     pub organization: Option<String>,
     pub project: Option<String>,
+    #[serde(default = "default_true")]
+    pub use_structured_input: bool,
+    #[serde(default = "default_true")]
+    pub tool_strict: bool,
 }
 
 impl Default for OpenAiProviderConfig {
@@ -46,8 +52,14 @@ impl Default for OpenAiProviderConfig {
             base_url: None,
             organization: None,
             project: None,
+            use_structured_input: true,
+            tool_strict: true,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl OpenAiProviderConfig {
@@ -146,6 +158,12 @@ enum OpenAiResponsesOutputItem {
         name: String,
         arguments: String,
     },
+    #[serde(rename = "refusal")]
+    Refusal {
+        #[serde(default)]
+        id: Option<String>,
+        refusal: String,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -156,6 +174,8 @@ struct OpenAiResponsesContentItem {
     content_type: String,
     #[serde(default)]
     text: Option<String>,
+    #[serde(default)]
+    refusal: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -373,6 +393,7 @@ impl OpenAiProviderAdapter {
             let mut pending_fn_calls: std::collections::HashMap<String, (String, String)> =
                 std::collections::HashMap::new();
             let mut usage: Option<ModelUsage> = None;
+            let mut output_id: Option<String> = None;
             let mut emitted_events = false;
             let mut text_index = 0_u64;
 
@@ -466,6 +487,10 @@ impl OpenAiProviderAdapter {
 
                                     // 最终 usage（在 response.completed 内）
                                     "response.completed" => {
+                                        output_id = obj["response"]["id"]
+                                            .as_str()
+                                            .map(str::to_string)
+                                            .or(output_id);
                                         if let Some(u) = obj["response"]["usage"].as_object() {
                                             let model_usage = ModelUsage {
                                                 input_tokens: u["input_tokens"]
@@ -525,7 +550,7 @@ impl OpenAiProviderAdapter {
                 };
 
                 yield crate::domain::ModelStreamEvent::Completed(ModelTurnOutput {
-                    output_id: "output.openai.stream".into(),
+                    output_id: output_id.unwrap_or_else(|| "output.openai.stream".into()),
                     items,
                     finish_reason,
                     usage,
@@ -559,16 +584,42 @@ impl OpenAiProviderAdapter {
         agent: &AgentDefinition,
         request: &ProviderPromptRequest,
     ) -> Result<Value> {
+        let input_messages = self.input_messages_for_request(request);
         let mut body = json!({
             "model": agent.model,
-            "input": [{
-                "role": "user",
-                "content": request.prompt,
-            }],
+            "input": input_messages,
         });
-        if let Some(preamble) = &agent.preamble {
-            body["instructions"] = Value::String(preamble.clone());
+
+        let instructions = request
+            .instructions
+            .as_ref()
+            .cloned()
+            .or_else(|| agent.preamble.clone());
+        if let Some(instructions) = instructions {
+            body["instructions"] = Value::String(instructions);
         }
+
+        if let Some(previous_response_id) = request.previous_response_id.as_ref() {
+            body["previous_response_id"] = Value::String(previous_response_id.clone());
+        }
+        if let Some(store) = request.store {
+            body["store"] = json!(store);
+        }
+
+        if let Some(format_value) = request
+            .text_format
+            .as_ref()
+            .or(request.response_format.as_ref())
+        {
+            if format_value.get("format").is_some() {
+                body["text"] = format_value.clone();
+            } else {
+                body["text"] = json!({
+                    "format": format_value,
+                });
+            }
+        }
+
         if let Some(temperature) = agent.temperature {
             body["temperature"] = json!(temperature);
         }
@@ -591,7 +642,7 @@ impl OpenAiProviderAdapter {
                             "name": name,
                             "description": description,
                             "parameters": parameters,
-                            "strict": false,
+                            "strict": self.config.tool_strict,
                         }))
                     })
                     .collect::<Result<Vec<_>>>()?,
@@ -600,6 +651,42 @@ impl OpenAiProviderAdapter {
             body["parallel_tool_calls"] = json!(false);
         }
         Ok(body)
+    }
+
+    fn input_messages_for_request(&self, request: &ProviderPromptRequest) -> Value {
+        if self.config.use_structured_input && !request.messages.is_empty() {
+            return Value::Array(
+                request
+                    .messages
+                    .iter()
+                    .map(openai_input_message_value)
+                    .collect(),
+            );
+        }
+
+        if !request.prompt.trim().is_empty() {
+            return json!([{
+                "role": "user",
+                "content": request.prompt,
+            }]);
+        }
+
+        Value::Array(vec![])
+    }
+}
+
+fn openai_input_message_value(message: &ProviderPromptMessage) -> Value {
+    let role = normalize_openai_input_role(&message.role);
+    json!({
+        "role": role,
+        "content": message.content,
+    })
+}
+
+fn normalize_openai_input_role(role: &str) -> &str {
+    match role {
+        "developer" | "user" | "assistant" | "system" => role,
+        _ => "user",
     }
 }
 
@@ -644,19 +731,43 @@ fn normalize_model_turn_output(payload: OpenAiResponsesApiResponse) -> Result<Mo
     for (index, item) in payload.output.into_iter().enumerate() {
         match item {
             OpenAiResponsesOutputItem::Message { id, content } => {
-                let text = content
-                    .into_iter()
-                    .filter(|item| item.content_type == "output_text")
-                    .filter_map(|item| item.text)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if text.trim().is_empty() {
-                    continue;
+                let mut message_parts = Vec::new();
+                let mut refusal_parts = Vec::new();
+                for content_item in content {
+                    match content_item.content_type.as_str() {
+                        "output_text" => {
+                            if let Some(text) = content_item.text {
+                                if !text.trim().is_empty() {
+                                    message_parts.push(text);
+                                }
+                            }
+                        }
+                        "refusal" => {
+                            if let Some(refusal) = content_item.refusal {
+                                if !refusal.trim().is_empty() {
+                                    refusal_parts.push(refusal);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                items.extend(parse_text_response_items(
-                    &collapse_repeated_text(text),
-                    id.unwrap_or_else(|| format!("msg_{index}")),
-                )?);
+                if !message_parts.is_empty() {
+                    items.extend(parse_text_response_items(
+                        &collapse_repeated_text(message_parts.join("\n")),
+                        id.clone().unwrap_or_else(|| format!("msg_{index}")),
+                    )?);
+                }
+                if !refusal_parts.is_empty() {
+                    items.push(ModelOutputItem::AssistantText(AssistantTextItem {
+                        item_id: format!(
+                            "{}_refusal",
+                            id.unwrap_or_else(|| format!("msg_{index}"))
+                        ),
+                        text: refusal_parts.join("\n"),
+                        is_partial: false,
+                    }));
+                }
             }
             OpenAiResponsesOutputItem::FunctionCall {
                 id,
@@ -678,6 +789,15 @@ fn normalize_model_turn_output(payload: OpenAiResponsesApiResponse) -> Result<Mo
                     args,
                     timeout_secs: None,
                 }));
+            }
+            OpenAiResponsesOutputItem::Refusal { id, refusal } => {
+                if !refusal.trim().is_empty() {
+                    items.push(ModelOutputItem::AssistantText(AssistantTextItem {
+                        item_id: id.unwrap_or_else(|| format!("refusal_{index}")),
+                        text: refusal,
+                        is_partial: false,
+                    }));
+                }
             }
             OpenAiResponsesOutputItem::Unknown => {}
         }
@@ -1135,6 +1255,18 @@ mod tests {
     use super::*;
 
     use crate::core::BillingPlugin;
+    use crate::domain::{FinishReason, ModelOutputItem, ModelTurnOutput, ModelUsage, ToolCallItem};
+
+    fn test_agent() -> AgentDefinition {
+        AgentDefinition {
+            agent_id: "test-agent".into(),
+            provider_id: "openai-default".into(),
+            model: "gpt-4o-mini".into(),
+            preamble: Some("default preamble".into()),
+            temperature: Some(0.1),
+            max_tokens: Some(256),
+        }
+    }
 
     #[tokio::test]
     async fn estimate_billing_uses_model_pricing_rule_for_text_usage() {
@@ -1145,6 +1277,8 @@ mod tests {
             base_url: None,
             organization: None,
             project: None,
+            use_structured_input: true,
+            tool_strict: true,
         });
         let usage = UsageRecord {
             usage_id: "usage_1".into(),
@@ -1212,5 +1346,195 @@ mod tests {
         assert_eq!(gpt_54_mini.input_per_million, 0.75);
         assert_eq!(gpt_54_mini.cached_input_per_million, Some(0.075));
         assert_eq!(gpt_54_mini.output_per_million, 4.50);
+    }
+
+    #[test]
+    fn responses_request_body_uses_structured_messages_and_structured_fields() {
+        let adapter = OpenAiProviderAdapter::new(OpenAiProviderConfig {
+            provider_id: "openai-default".into(),
+            api_key: Some("test-key".into()),
+            api_key_env: "OPENAI_API_KEY".into(),
+            base_url: None,
+            organization: None,
+            project: None,
+            use_structured_input: true,
+            tool_strict: true,
+        });
+        let body = adapter
+            .responses_request_body(
+                &test_agent(),
+                &ProviderPromptRequest {
+                    instructions: Some("runtime instructions".into()),
+                    messages: vec![
+                        ProviderPromptMessage {
+                            role: "developer".into(),
+                            content: "<developer>rules</developer>".into(),
+                        },
+                        ProviderPromptMessage {
+                            role: "user".into(),
+                            content: "<user>task</user>".into(),
+                        },
+                    ],
+                    previous_response_id: Some("resp_prev_123".into()),
+                    text_format: Some(json!({
+                        "type": "json_schema",
+                        "name": "tool_result",
+                        "schema": {
+                            "type": "object",
+                            "properties": { "ok": { "type": "boolean" } },
+                            "required": ["ok"]
+                        }
+                    })),
+                    response_format: None,
+                    store: Some(true),
+                    prompt: "<legacy_prompt />".into(),
+                    tools: vec![],
+                },
+            )
+            .expect("request body");
+
+        assert_eq!(body["instructions"], "runtime instructions");
+        assert_eq!(body["previous_response_id"], "resp_prev_123");
+        assert_eq!(body["store"], true);
+        assert_eq!(body["input"][0]["role"], "developer");
+        assert_eq!(body["input"][1]["role"], "user");
+        assert_eq!(body["input"][1]["content"], "<user>task</user>");
+        assert_eq!(body["text"]["format"]["type"], "json_schema");
+    }
+
+    #[test]
+    fn responses_request_body_supports_legacy_prompt_path() {
+        let adapter = OpenAiProviderAdapter::new(OpenAiProviderConfig {
+            provider_id: "openai-default".into(),
+            api_key: Some("test-key".into()),
+            api_key_env: "OPENAI_API_KEY".into(),
+            base_url: None,
+            organization: None,
+            project: None,
+            use_structured_input: false,
+            tool_strict: true,
+        });
+        let body = adapter
+            .responses_request_body(
+                &test_agent(),
+                &ProviderPromptRequest {
+                    prompt: "<agentjax_prompt />".into(),
+                    ..ProviderPromptRequest::default()
+                },
+            )
+            .expect("request body");
+
+        assert_eq!(body["input"][0]["role"], "user");
+        assert_eq!(body["input"][0]["content"], "<agentjax_prompt />");
+    }
+
+    #[test]
+    fn responses_request_body_tool_strict_respects_config() {
+        let adapter = OpenAiProviderAdapter::new(OpenAiProviderConfig {
+            provider_id: "openai-default".into(),
+            api_key: Some("test-key".into()),
+            api_key_env: "OPENAI_API_KEY".into(),
+            base_url: None,
+            organization: None,
+            project: None,
+            use_structured_input: true,
+            tool_strict: false,
+        });
+        let body = adapter
+            .responses_request_body(
+                &test_agent(),
+                &ProviderPromptRequest {
+                    prompt: "test".into(),
+                    tools: vec![crate::builtin::tools::ToolDescriptor {
+                        name: "echo".into(),
+                        description: "echo".into(),
+                        when_to_use: "when needed".into(),
+                        when_not_to_use: "never".into(),
+                        arguments_schema: json!({
+                            "type": "object",
+                            "properties": {
+                                "value": { "type": "string" }
+                            }
+                        }),
+                        idempotent: true,
+                        default_timeout_secs: 10,
+                    }],
+                    ..ProviderPromptRequest::default()
+                },
+            )
+            .expect("request body");
+
+        assert_eq!(body["tools"][0]["strict"], false);
+    }
+
+    #[test]
+    fn normalize_model_turn_output_parses_function_call_and_refusal() {
+        let output = normalize_model_turn_output(OpenAiResponsesApiResponse {
+            id: Some("resp_1".into()),
+            usage: None,
+            output_text: None,
+            output: vec![
+                OpenAiResponsesOutputItem::Message {
+                    id: Some("msg_1".into()),
+                    content: vec![OpenAiResponsesContentItem {
+                        content_type: "refusal".into(),
+                        text: None,
+                        refusal: Some("I can't help with that.".into()),
+                    }],
+                },
+                OpenAiResponsesOutputItem::FunctionCall {
+                    id: Some("fc_1".into()),
+                    call_id: Some("call_1".into()),
+                    name: "shell_exec".into(),
+                    arguments: "{\"command\":\"pwd\"}".into(),
+                },
+            ],
+        })
+        .expect("normalize output");
+
+        assert_eq!(output.output_id, "resp_1");
+        assert!(
+            output
+                .items
+                .iter()
+                .any(|item| matches!(item, ModelOutputItem::ToolCall(_)))
+        );
+        assert!(output
+            .items
+            .iter()
+            .any(|item| matches!(item, ModelOutputItem::AssistantText(text) if text.text.contains("can't help"))));
+        assert_eq!(output.finish_reason, FinishReason::ToolCalls);
+    }
+
+    #[test]
+    fn model_turn_to_events_keeps_tool_call_events() {
+        let output = ModelTurnOutput {
+            output_id: "resp_stream".into(),
+            items: vec![ModelOutputItem::ToolCall(ToolCallItem {
+                item_id: "fc_1".into(),
+                tool_call_id: "call_1".into(),
+                tool_name: "echo".into(),
+                args: json!({"value":"ok"}),
+                timeout_secs: None,
+            })],
+            finish_reason: FinishReason::ToolCalls,
+            usage: Some(ModelUsage {
+                input_tokens: Some(12),
+                output_tokens: Some(4),
+            }),
+        };
+
+        let events = model_turn_to_events(output);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                Ok(crate::domain::ModelStreamEvent::ToolCall(ToolCallItem { tool_name, .. })) if tool_name == "echo"
+            )
+        }));
+        assert!(
+            events.iter().any(|event| {
+                matches!(event, Ok(crate::domain::ModelStreamEvent::Completed(_)))
+            })
+        );
     }
 }

@@ -281,10 +281,15 @@ impl Daemon {
         mut stream: Option<&mut SemanticStreamBuilder>,
     ) -> Result<ToolLoopOutcome, ApiError> {
         let mut loop_messages = conversation_messages;
+        let mut previous_response_id: Option<String> = None;
 
         for iteration in 0..=MAX_TOOL_LOOP_STEPS {
-            let prompt =
-                build_tool_followup_prompt(&self.app, assembled_context, loop_messages.clone());
+            let prompt_request = build_tool_followup_prompt_request(
+                &self.app,
+                assembled_context,
+                loop_messages.clone(),
+                previous_response_id.clone(),
+            );
             let request_started_at = Utc::now();
             let request_started = std::time::Instant::now();
             self.record_event(
@@ -304,10 +309,16 @@ impl Daemon {
                     .app
                     .runtime
                     .stream_turn(AgentPromptRequest {
-                        prompt,
+                        instructions: prompt_request.instructions.clone(),
+                        messages: prompt_request.messages.clone(),
+                        previous_response_id: prompt_request.previous_response_id.clone(),
+                        text_format: prompt_request.text_format.clone(),
+                        response_format: prompt_request.response_format.clone(),
+                        store: prompt_request.store,
+                        prompt: prompt_request.prompt.clone(),
                         agent_id: Some(self.app.runtime.default_agent().agent_id.clone()),
                         agent_override: Some(session_agent.clone()),
-                        tools: self.app.tool_registry.descriptors(),
+                        tools: prompt_request.tools.clone(),
                     })
                     .await
                     .map_err(|error| {
@@ -354,10 +365,16 @@ impl Daemon {
                 self.app
                     .runtime
                     .prompt_turn(AgentPromptRequest {
-                        prompt,
+                        instructions: prompt_request.instructions,
+                        messages: prompt_request.messages,
+                        previous_response_id: prompt_request.previous_response_id,
+                        text_format: prompt_request.text_format,
+                        response_format: prompt_request.response_format,
+                        store: prompt_request.store,
+                        prompt: prompt_request.prompt,
                         agent_id: Some(self.app.runtime.default_agent().agent_id.clone()),
                         agent_override: Some(session_agent.clone()),
-                        tools: self.app.tool_registry.descriptors(),
+                        tools: prompt_request.tools,
                     })
                     .await
                     .map_err(|error| {
@@ -381,6 +398,7 @@ impl Daemon {
                     "iteration": iteration,
                 }),
             )?;
+            previous_response_id = Some(response.output_id.clone());
             if let Some(usage) = response.usage.as_ref() {
                 let latency_ms = request_started
                     .elapsed()

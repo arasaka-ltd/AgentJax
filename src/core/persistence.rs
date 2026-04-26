@@ -14,6 +14,7 @@ pub struct SessionRecord {
 
 pub trait SessionStore: Send + Sync {
     fn upsert_session(&self, session: Session) -> Result<Session>;
+    fn list_session_heads(&self) -> Result<Vec<Session>>;
     fn list_sessions(&self) -> Result<Vec<SessionRecord>>;
     fn get_session(&self, session_id: &str) -> Result<Option<SessionRecord>>;
     fn append_message(

@@ -15,8 +15,8 @@ pub use event_store::EventStore;
 pub use expander::HistoryExpander;
 pub use projection_store::ProjectionStore;
 pub use prompt::{
-    parse_workspace_prompt_documents, render_prompt_xml, PromptDocument, PromptFragment,
-    PromptRenderRequest, PromptSection,
+    PromptDocument, PromptFragment, PromptRenderRequest, PromptRolePayload, PromptSection,
+    parse_workspace_prompt_documents, render_prompt_role_payload, render_prompt_xml,
 };
 pub use resume::ResumeBuilder;
 pub use schema::ContextEngineSchema;

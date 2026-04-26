@@ -1,9 +1,10 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
+use serde_json::Value;
 
 use crate::config::{AgentDefinition, RuntimeConfig};
 use crate::core::{
-    plugin::{ModelEventStream, ProviderPromptRequest},
     PluginHost, WorkspaceRuntimeHost,
+    plugin::{ModelEventStream, ProviderPromptMessage, ProviderPromptRequest},
 };
 use crate::domain::ModelTurnOutput;
 
@@ -16,6 +17,12 @@ pub struct ApplicationRuntime {
 
 #[derive(Debug, Clone)]
 pub struct AgentPromptRequest {
+    pub instructions: Option<String>,
+    pub messages: Vec<ProviderPromptMessage>,
+    pub previous_response_id: Option<String>,
+    pub text_format: Option<Value>,
+    pub response_format: Option<Value>,
+    pub store: Option<bool>,
     pub prompt: String,
     pub agent_id: Option<String>,
     pub agent_override: Option<AgentDefinition>,
@@ -67,6 +74,12 @@ impl ApplicationRuntime {
             .prompt_turn(
                 agent,
                 ProviderPromptRequest {
+                    instructions: request.instructions,
+                    messages: request.messages,
+                    previous_response_id: request.previous_response_id,
+                    text_format: request.text_format,
+                    response_format: request.response_format,
+                    store: request.store,
                     prompt: request.prompt,
                     tools: request.tools,
                 },
@@ -86,6 +99,12 @@ impl ApplicationRuntime {
             .stream_turn(
                 agent,
                 ProviderPromptRequest {
+                    instructions: request.instructions,
+                    messages: request.messages,
+                    previous_response_id: request.previous_response_id,
+                    text_format: request.text_format,
+                    response_format: request.response_format,
+                    store: request.store,
                     prompt: request.prompt,
                     tools: request.tools,
                 },

@@ -2,12 +2,13 @@ use std::{pin::Pin, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use futures_util::{stream, Stream};
+use futures_util::{Stream, stream};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::builtin::tools::{ToolDescriptor, ToolRegistry};
-use crate::config::{secrets::resolve_secret_refs, AgentDefinition, RuntimeConfig};
+use crate::config::{AgentDefinition, RuntimeConfig, secrets::resolve_secret_refs};
 use crate::core::{
     EventBus, EventStore, HookBus, PluginRegistry, ResourceRegistry, SessionStore,
     WorkspaceRuntimeHost,
@@ -47,8 +48,20 @@ pub type ModelEventStream = Pin<Box<dyn Stream<Item = Result<ModelStreamEvent>> 
 
 #[derive(Debug, Clone, Default)]
 pub struct ProviderPromptRequest {
+    pub instructions: Option<String>,
+    pub messages: Vec<ProviderPromptMessage>,
+    pub previous_response_id: Option<String>,
+    pub text_format: Option<Value>,
+    pub response_format: Option<Value>,
+    pub store: Option<bool>,
     pub prompt: String,
     pub tools: Vec<ToolDescriptor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderPromptMessage {
+    pub role: String,
+    pub content: String,
 }
 
 impl ModelClient {

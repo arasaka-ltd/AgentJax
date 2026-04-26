@@ -68,6 +68,13 @@ pub struct PromptRenderRequest {
     pub allow_tool_calls: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PromptRolePayload {
+    pub instructions_xml: String,
+    pub user_xml: String,
+    pub full_xml: String,
+}
+
 pub fn parse_workspace_prompt_documents(identity: &WorkspaceIdentityPack) -> Vec<PromptDocument> {
     vec![
         parse_workspace_document("agent", PromptDocumentKind::Agent, &identity.agent),
@@ -100,6 +107,42 @@ pub fn render_prompt_xml(request: PromptRenderRequest) -> String {
     );
     xml.push_str("</agentjax_prompt>");
     xml
+}
+
+pub fn render_prompt_role_payload(request: PromptRenderRequest) -> PromptRolePayload {
+    let mut instructions_xml = String::new();
+    instructions_xml.push_str("<agentjax_instructions version=\"v1\">\n");
+    render_identity(&mut instructions_xml, &request.prompt_documents);
+    render_memory(
+        &mut instructions_xml,
+        &request.prompt_documents,
+        &request.assembled_context.blocks,
+    );
+    render_knowledge(&mut instructions_xml, &request.assembled_context.blocks);
+    render_tools(
+        &mut instructions_xml,
+        &request.tools,
+        request.allow_tool_calls,
+    );
+    render_task_state(&mut instructions_xml, &request.assembled_context.blocks);
+    render_runtime(&mut instructions_xml, &request.assembled_context);
+    instructions_xml.push_str("</agentjax_instructions>");
+
+    let mut user_xml = String::new();
+    user_xml.push_str("<agentjax_user_input version=\"v1\">\n");
+    render_conversation(
+        &mut user_xml,
+        &request.assembled_context.blocks,
+        &request.conversation_messages,
+    );
+    user_xml.push_str("</agentjax_user_input>");
+
+    let full_xml = render_prompt_xml(request);
+    PromptRolePayload {
+        instructions_xml,
+        user_xml,
+        full_xml,
+    }
 }
 
 fn parse_workspace_document(
@@ -526,4 +569,57 @@ fn slugify(value: &str) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("-")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::SessionMessage;
+    use crate::context_engine::AssembledContext;
+    use serde_json::json;
+
+    #[test]
+    fn render_prompt_role_payload_splits_instructions_and_user_content() {
+        let payload = render_prompt_role_payload(PromptRenderRequest {
+            prompt_documents: vec![PromptDocument {
+                document_id: "rules".into(),
+                kind: PromptDocumentKind::Rules,
+                source_path: "/tmp/rules.md".into(),
+                sections: vec![PromptSection {
+                    section_id: "rules.general".into(),
+                    title: "General".into(),
+                    kind: PromptSectionKind::Rules,
+                    fragments: vec![PromptFragment {
+                        source_file: "/tmp/rules.md".into(),
+                        section_title: "General".into(),
+                        content: "Always cite key assumptions.".into(),
+                        priority: 1,
+                        freshness: None,
+                    }],
+                }],
+            }],
+            assembled_context: AssembledContext::default(),
+            tools: vec![ToolDescriptor {
+                name: "echo".into(),
+                description: "Echo input".into(),
+                when_to_use: "when a mirror is needed".into(),
+                when_not_to_use: "when side effects are needed".into(),
+                arguments_schema: json!({
+                    "type": "object",
+                    "properties": { "value": { "type": "string" } }
+                }),
+                default_timeout_secs: 10,
+                idempotent: true,
+            }],
+            conversation_messages: vec![SessionMessage::user("Please summarize this.")],
+            allow_tool_calls: true,
+        });
+
+        assert!(payload.instructions_xml.contains("<agentjax_instructions"));
+        assert!(payload.instructions_xml.contains("<tools>"));
+        assert!(!payload.instructions_xml.contains("<conversation>"));
+        assert!(payload.user_xml.contains("<agentjax_user_input"));
+        assert!(payload.user_xml.contains("<conversation>"));
+        assert!(payload.full_xml.contains("<agentjax_prompt"));
+    }
 }

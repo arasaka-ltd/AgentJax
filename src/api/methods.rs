@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 
 use crate::api::{StreamId, SubscriptionId};
 use crate::domain::{
-    Agent, AgentStatus, Node, NodeStatus, PluginDescriptor, Schedule, Session, SessionModelTarget,
-    SessionStatus, Task, TaskCheckpoint, TaskStatus, TaskTimelineEntry,
+    Agent, AgentStatus, Node, NodeStatus, PluginDescriptor, Schedule, Session, SessionMode,
+    SessionModelTarget, SessionStatus, Task, TaskCheckpoint, TaskStatus, TaskTimelineEntry,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -35,6 +35,8 @@ pub enum ApiMethod {
     AgentList,
     #[serde(rename = "agent.get")]
     AgentGet,
+    #[serde(rename = "session.create")]
+    SessionCreate,
     #[serde(rename = "session.list")]
     SessionList,
     #[serde(rename = "session.get")]
@@ -100,6 +102,7 @@ impl ApiMethod {
             Self::PluginTest => "plugin.test",
             Self::AgentList => "agent.list",
             Self::AgentGet => "agent.get",
+            Self::SessionCreate => "session.create",
             Self::SessionList => "session.list",
             Self::SessionGet => "session.get",
             Self::SessionSend => "session.send",
@@ -268,6 +271,27 @@ pub struct AgentGetRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentGetResponse {
     pub agent: Agent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionCreateRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<SessionMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionCreateResponse {
+    pub session: Session,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

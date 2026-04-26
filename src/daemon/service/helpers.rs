@@ -58,21 +58,70 @@ pub(super) fn build_context_prompt(
     conversation_messages: Vec<SessionMessage>,
     allow_tool_calls: bool,
 ) -> String {
-    render_prompt_xml(PromptRenderRequest {
-        prompt_documents: parse_workspace_prompt_documents(&app.workspace_identity),
+    crate::context_engine::render_prompt_role_payload(crate::context_engine::PromptRenderRequest {
+        prompt_documents: crate::context_engine::parse_workspace_prompt_documents(
+            &app.workspace_identity,
+        ),
         assembled_context: assembled.clone(),
         tools: app.tool_registry.descriptors(),
         conversation_messages,
         allow_tool_calls,
     })
+    .full_xml
 }
 
-pub(super) fn build_tool_followup_prompt(
+pub(super) fn build_context_prompt_request(
     app: &Application,
     assembled: &AssembledContext,
     conversation_messages: Vec<SessionMessage>,
-) -> String {
-    build_context_prompt(app, assembled, conversation_messages, true)
+    allow_tool_calls: bool,
+    previous_response_id: Option<String>,
+) -> crate::core::plugin::ProviderPromptRequest {
+    let payload = crate::context_engine::render_prompt_role_payload(
+        crate::context_engine::PromptRenderRequest {
+            prompt_documents: crate::context_engine::parse_workspace_prompt_documents(
+                &app.workspace_identity,
+            ),
+            assembled_context: assembled.clone(),
+            tools: app.tool_registry.descriptors(),
+            conversation_messages,
+            allow_tool_calls,
+        },
+    );
+    crate::core::plugin::ProviderPromptRequest {
+        instructions: Some(payload.instructions_xml.clone()),
+        messages: vec![
+            crate::core::plugin::ProviderPromptMessage {
+                role: "developer".into(),
+                content: payload.instructions_xml,
+            },
+            crate::core::plugin::ProviderPromptMessage {
+                role: "user".into(),
+                content: payload.user_xml,
+            },
+        ],
+        previous_response_id,
+        text_format: None,
+        response_format: None,
+        store: None,
+        prompt: payload.full_xml,
+        tools: app.tool_registry.descriptors(),
+    }
+}
+
+pub(super) fn build_tool_followup_prompt_request(
+    app: &Application,
+    assembled: &AssembledContext,
+    conversation_messages: Vec<SessionMessage>,
+    previous_response_id: Option<String>,
+) -> crate::core::plugin::ProviderPromptRequest {
+    build_context_prompt_request(
+        app,
+        assembled,
+        conversation_messages,
+        true,
+        previous_response_id,
+    )
 }
 
 pub(super) fn recent_prompt_messages(

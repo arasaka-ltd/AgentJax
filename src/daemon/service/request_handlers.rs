@@ -24,20 +24,21 @@ impl Daemon {
             ApiMethod::PluginTest => self.handle_plugin_test(request.parse_params()?),
             ApiMethod::AgentList => self.handle_agent_list(),
             ApiMethod::AgentGet => self.handle_agent_get(request.parse_params()?),
+            ApiMethod::SessionCreate => self.handle_session_create(request.parse_params()?),
             ApiMethod::SessionList => {
                 let items = self
                     .store
-                    .list_sessions()
+                    .list_session_heads()
                     .map_err(internal_store_error)?
                     .into_iter()
                     .map(|state| SessionListItem {
-                        session_id: state.session.session_id,
-                        agent_id: state.session.agent_id,
-                        title: state.session.title,
-                        status: state.session.status,
-                        channel_id: state.session.channel_id,
-                        surface_id: state.session.surface_id,
-                        last_activity_at: Some(state.session.meta.updated_at),
+                        session_id: state.session_id,
+                        agent_id: state.agent_id,
+                        title: state.title,
+                        status: state.status,
+                        channel_id: state.channel_id,
+                        surface_id: state.surface_id,
+                        last_activity_at: Some(state.meta.updated_at),
                     })
                     .collect();
                 Ok((self.serialize(SessionListResponse { items })?, Vec::new()))
@@ -190,7 +191,7 @@ impl Daemon {
                     ApiErrorCode::InvalidRequest,
                     format!("unknown config section: {other}"),
                     false,
-                ))
+                ));
             }
         };
         Ok((
@@ -769,7 +770,7 @@ impl Daemon {
             .len();
         let session_count = self
             .store
-            .list_sessions()
+            .list_session_heads()
             .map_err(internal_store_error)?
             .len();
         let node_count = self.node_registry().list().len();

@@ -14,7 +14,7 @@ use std::{
 use chrono::Utc;
 use futures_util::StreamExt;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::{
@@ -29,27 +29,24 @@ use crate::{
         ResponseEnvelope, RuntimePingResponse, RuntimeShutdownRequest, RuntimeShutdownResponse,
         RuntimeStatusResponse, ScheduleCreateRequest, ScheduleDeleteRequest, ScheduleGetResponse,
         ScheduleListItem, ScheduleListResponse, ScheduleUpdateRequest, ServerEnvelope,
-        SessionCancelRequest, SessionGetRequest, SessionGetResponse, SessionListItem,
-        SessionListResponse, SessionMessage, SessionMessageAnnotation, SessionModelInspectRequest,
-        SessionModelInspectResponse, SessionModelState, SessionModelSwitchRequest,
-        SessionModelSwitchResponse, SessionModelSwitchResult, SessionSendRequest,
-        SessionSendResponse, SessionSubscribeRequest, SmokeRunRequest, SmokeRunResponse,
-        StreamCancelRequest, StreamEnvelope, StreamPhase, SubscriptionCancelRequest,
-        SubscriptionResponse, TaskCancelRequest, TaskGetRequest, TaskGetResponse, TaskListItem,
-        TaskListResponse, TaskRetryRequest, TaskSubscribeRequest,
+        SessionCancelRequest, SessionCreateRequest, SessionCreateResponse, SessionGetRequest,
+        SessionGetResponse, SessionListItem, SessionListResponse, SessionMessage,
+        SessionMessageAnnotation, SessionModelInspectRequest, SessionModelInspectResponse,
+        SessionModelState, SessionModelSwitchRequest, SessionModelSwitchResponse,
+        SessionModelSwitchResult, SessionSendRequest, SessionSendResponse, SessionSubscribeRequest,
+        SmokeRunRequest, SmokeRunResponse, StreamCancelRequest, StreamEnvelope, StreamPhase,
+        SubscriptionCancelRequest, SubscriptionResponse, TaskCancelRequest, TaskGetRequest,
+        TaskGetResponse, TaskListItem, TaskListResponse, TaskRetryRequest, TaskSubscribeRequest,
     },
     app::Application,
-    context_engine::{
-        parse_workspace_prompt_documents, render_prompt_xml, AssembledContext,
-        ContextAssemblyRequest, PromptRenderRequest,
-    },
+    context_engine::{AssembledContext, ContextAssemblyRequest},
     core::AgentPromptRequest,
     daemon::store::DaemonStore,
     domain::{
         Agent, AgentStatus, AutonomyPolicy, ContextAssemblyPurpose, EventType, ExecutionMode,
         ModelOutputItem, ModelTurnOutput, NodeSelector, ObjectMeta, PluginDescriptor, PluginStatus,
-        Schedule, Session, SessionModelTarget, Task, TaskStatus, ToolCall, ToolCallItem,
-        ToolCaller, ToolResultItem, TrustLevel,
+        Schedule, Session, SessionMode, SessionModelTarget, SessionStatus, Task, TaskStatus,
+        ToolCall, ToolCallItem, ToolCaller, ToolResultItem, TrustLevel,
     },
 };
 
@@ -215,10 +212,12 @@ mod tests {
         let nodes: crate::api::NodeListResponse = ok_result(&node_list_dispatch.response);
         assert_eq!(nodes.items.len(), 1);
         assert_eq!(nodes.items[0].node_id, "node.local");
-        assert!(nodes.items[0]
-            .capabilities
-            .iter()
-            .any(|capability| capability == "session.interaction"));
+        assert!(
+            nodes.items[0]
+                .capabilities
+                .iter()
+                .any(|capability| capability == "session.interaction")
+        );
 
         let node_get_dispatch = daemon
             .handle_request(request(
@@ -273,12 +272,14 @@ mod tests {
             ))
             .await;
         let session_subscription: SubscriptionResponse = ok_result(&session_sub_dispatch.response);
-        assert!(daemon
-            .control
-            .lock()
-            .expect("control lock poisoned")
-            .subscriptions
-            .contains_key(session_subscription.subscription_id.0.as_str()));
+        assert!(
+            daemon
+                .control
+                .lock()
+                .expect("control lock poisoned")
+                .subscriptions
+                .contains_key(session_subscription.subscription_id.0.as_str())
+        );
 
         let session_send_dispatch = daemon
             .handle_request(request(
@@ -382,12 +383,14 @@ mod tests {
             ))
             .await;
         let _: serde_json::Value = ok_result(&task_cancel_dispatch.response);
-        assert!(daemon
-            .control
-            .lock()
-            .expect("control lock poisoned")
-            .subscriptions
-            .is_empty());
+        assert!(
+            daemon
+                .control
+                .lock()
+                .expect("control lock poisoned")
+                .subscriptions
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -515,9 +518,11 @@ mod tests {
             .expect("session load failed")
             .expect("default session missing")
             .events;
-        assert!(events
-            .iter()
-            .any(|event| event.event_type == EventType::ScheduleTriggered));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == EventType::ScheduleTriggered)
+        );
         assert!(events.iter().any(|event| {
             event.event_type == EventType::ScheduleTriggered
                 && event.payload["selected_node_id"].as_str() == Some("node.local")

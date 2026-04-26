@@ -35,6 +35,7 @@ pub struct DaemonStore {
     ready: AtomicBool,
     draining: AtomicBool,
     next_connection: AtomicU64,
+    next_session: AtomicU64,
     next_message: AtomicU64,
     next_turn: AtomicU64,
     next_event: AtomicU64,
@@ -65,6 +66,7 @@ impl DaemonStore {
             ready: AtomicBool::new(true),
             draining: AtomicBool::new(false),
             next_connection: AtomicU64::new(1),
+            next_session: AtomicU64::new(1),
             next_message: AtomicU64::new(1),
             next_turn: AtomicU64::new(1),
             next_event: AtomicU64::new(1),
@@ -111,6 +113,11 @@ impl DaemonStore {
         format!("turn_{id}")
     }
 
+    pub fn next_session_id(&self) -> String {
+        let id = self.next_session.fetch_add(1, Ordering::Relaxed);
+        format!("session_{id}")
+    }
+
     pub fn next_message_id(&self) -> String {
         let id = self.next_message.fetch_add(1, Ordering::Relaxed);
         format!("msg_{id}")
@@ -153,6 +160,10 @@ impl DaemonStore {
 
     pub fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
         self.persistence.list_sessions()
+    }
+
+    pub fn list_session_heads(&self) -> Result<Vec<Session>> {
+        self.persistence.list_session_heads()
     }
 
     pub fn get_session(&self, session_id: &str) -> Result<Option<SessionRecord>> {
@@ -367,6 +378,7 @@ impl DaemonStore {
         let tasks = self.tasks.list()?;
 
         let mut next_message = 1_u64;
+        let mut next_session = 1_u64;
         let mut next_turn = 1_u64;
         let mut next_event = 1_u64;
         let mut next_task = 1_u64;
@@ -375,6 +387,8 @@ impl DaemonStore {
         let mut next_billing = 1_u64;
 
         for record in &sessions {
+            next_session =
+                next_session.max(next_counter_value(&record.session.session_id, "session_"));
             if let Some(last_turn_id) = record.session.last_turn_id.as_deref() {
                 next_turn = next_turn.max(next_counter_value(last_turn_id, "turn_"));
             }
@@ -423,6 +437,7 @@ impl DaemonStore {
             next_billing = next_billing.max(next_counter_value(&record.billing_id, "billing_"));
         }
 
+        self.next_session.store(next_session, Ordering::Relaxed);
         self.next_message.store(next_message, Ordering::Relaxed);
         self.next_turn.store(next_turn, Ordering::Relaxed);
         self.next_event.store(next_event, Ordering::Relaxed);
@@ -471,6 +486,10 @@ impl SqlitePersistenceBridge {
 impl SessionStore for SqlitePersistenceBridge {
     fn upsert_session(&self, session: Session) -> Result<Session> {
         self.session_store.upsert_session(session)
+    }
+
+    fn list_session_heads(&self) -> Result<Vec<Session>> {
+        self.session_store.list_session_heads()
     }
 
     fn list_sessions(&self) -> Result<Vec<SessionRecord>> {

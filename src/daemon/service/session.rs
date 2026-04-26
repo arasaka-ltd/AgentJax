@@ -1,13 +1,97 @@
 use super::*;
 
 impl Daemon {
+    pub(super) fn handle_session_create(
+        &self,
+        params: SessionCreateRequest,
+    ) -> Result<(Value, Vec<ServerEnvelope>), ApiError> {
+        let mut session_id = params
+            .session_id
+            .unwrap_or_else(|| self.store.next_session_id());
+        session_id = session_id.trim().to_string();
+        if session_id.is_empty() {
+            return Err(ApiError::new(
+                ApiErrorCode::InvalidRequest,
+                "session_id cannot be empty",
+                false,
+            ));
+        }
+
+        if self
+            .store
+            .get_session(&session_id)
+            .map_err(internal_store_error)?
+            .is_some()
+        {
+            return Err(ApiError::new(
+                ApiErrorCode::Conflict,
+                format!("session already exists: {session_id}"),
+                false,
+            ));
+        }
+
+        let mut meta = ObjectMeta::new(
+            session_id.clone(),
+            self.app.runtime_config.state_schema_version.clone(),
+        );
+        let now = Utc::now();
+        meta.created_at = now;
+        meta.updated_at = now;
+        let session = Session {
+            meta,
+            session_id: session_id.clone(),
+            workspace_id: self.app.runtime_config.workspace.workspace_id.clone(),
+            agent_id: self
+                .app
+                .runtime_config
+                .agent_runtime
+                .default_agent
+                .agent_id
+                .clone(),
+            channel_id: params.channel_id,
+            surface_id: params.surface_id,
+            user_id: params.user_id,
+            title: params.title,
+            mode: params.mode.unwrap_or(SessionMode::Interactive),
+            status: SessionStatus::Idle,
+            last_turn_id: None,
+            current_provider_id: Some(
+                self.app
+                    .runtime_config
+                    .agent_runtime
+                    .default_agent
+                    .provider_id
+                    .clone(),
+            ),
+            current_model_id: Some(
+                self.app
+                    .runtime_config
+                    .agent_runtime
+                    .default_agent
+                    .model
+                    .clone(),
+            ),
+            pending_model_switch: None,
+            last_model_switched_at: None,
+        };
+
+        let session = self
+            .store
+            .upsert_session(session)
+            .map_err(internal_store_error)?;
+        Ok((
+            self.serialize(SessionCreateResponse { session })?,
+            Vec::new(),
+        ))
+    }
+
     pub(super) async fn handle_session_send_dispatch(&self, request: RequestEnvelope) -> Dispatch {
         let params: SessionSendRequest = match request.parse_params() {
             Ok(params) => params,
             Err(error) => {
                 return Dispatch::single(ServerEnvelope::Response(ResponseEnvelope::err(
                     request.id, error,
-                )))
+                )));
             }
         };
 

@@ -25,6 +25,9 @@ const INITIAL_MIGRATION_DESCRIPTION: &str =
     "initial session, message, and runtime event persistence";
 const MODEL_SWITCH_MIGRATION_VERSION: &str = "2026_04_10_0002_session_model_switching";
 const MODEL_SWITCH_MIGRATION_DESCRIPTION: &str = "add session model binding columns";
+const LCM_SCHEMA_MIGRATION_VERSION: &str = "2026_04_27_0003_lcm_runtime_store";
+const LCM_SCHEMA_MIGRATION_DESCRIPTION: &str =
+    "add lcm summary dag, projection snapshots, and multi-session indexes";
 
 const INITIAL_MIGRATION_SQL: &str = r#"
 CREATE TABLE sessions (
@@ -97,6 +100,148 @@ ALTER TABLE sessions ADD COLUMN current_model_id TEXT NULL;
 ALTER TABLE sessions ADD COLUMN pending_provider_id TEXT NULL;
 ALTER TABLE sessions ADD COLUMN pending_model_id TEXT NULL;
 ALTER TABLE sessions ADD COLUMN last_model_switched_at TEXT NULL;
+"#;
+
+const LCM_SCHEMA_MIGRATION_SQL: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_sessions_workspace_updated
+    ON sessions(workspace_id, updated_at DESC, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_status_updated
+    ON sessions(status, updated_at DESC, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_session_messages_turn_seq
+    ON session_messages(turn_id, sequence_no);
+CREATE INDEX IF NOT EXISTS idx_session_messages_actor_created
+    ON session_messages(actor_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_runtime_events_workspace_session_time
+    ON runtime_events(workspace_id, session_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_runtime_events_correlation_time
+    ON runtime_events(correlation_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_runtime_events_idempotency
+    ON runtime_events(idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS lcm_summary_nodes (
+    summary_node_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    session_id TEXT NULL,
+    task_id TEXT NULL,
+    depth INTEGER NOT NULL,
+    summary_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    earliest_at TEXT NULL,
+    latest_at TEXT NULL,
+    descendant_count INTEGER NOT NULL DEFAULT 0,
+    token_count INTEGER NOT NULL DEFAULT 0,
+    confidence TEXT NOT NULL,
+    freshness TEXT NOT NULL,
+    invalidation_status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    schema_version TEXT NOT NULL,
+    meta_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_lcm_summary_scope_depth
+    ON lcm_summary_nodes(workspace_id, session_id, task_id, depth);
+CREATE INDEX IF NOT EXISTS idx_lcm_summary_latest_at
+    ON lcm_summary_nodes(latest_at);
+CREATE INDEX IF NOT EXISTS idx_lcm_summary_freshness
+    ON lcm_summary_nodes(freshness, invalidation_status);
+
+CREATE TABLE IF NOT EXISTS lcm_summary_event_refs (
+    summary_node_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    position_no INTEGER NOT NULL,
+    PRIMARY KEY (summary_node_id, event_id),
+    FOREIGN KEY(summary_node_id) REFERENCES lcm_summary_nodes(summary_node_id) ON DELETE CASCADE,
+    FOREIGN KEY(event_id) REFERENCES runtime_events(event_id) ON DELETE RESTRICT
+);
+
+CREATE INDEX IF NOT EXISTS idx_lcm_summary_event_refs_event
+    ON lcm_summary_event_refs(event_id, position_no);
+
+CREATE TABLE IF NOT EXISTS lcm_summary_artifact_refs (
+    summary_node_id TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    position_no INTEGER NOT NULL,
+    PRIMARY KEY (summary_node_id, artifact_id),
+    FOREIGN KEY(summary_node_id) REFERENCES lcm_summary_nodes(summary_node_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_lcm_summary_artifact_refs_artifact
+    ON lcm_summary_artifact_refs(artifact_id, position_no);
+
+CREATE TABLE IF NOT EXISTS lcm_compaction_runs (
+    compaction_run_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    session_id TEXT NULL,
+    task_id TEXT NULL,
+    level TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    source_start_event_id TEXT NULL,
+    source_end_event_id TEXT NULL,
+    produced_summary_node_id TEXT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT NULL,
+    error_text TEXT NULL,
+    meta_json TEXT NOT NULL,
+    FOREIGN KEY(produced_summary_node_id) REFERENCES lcm_summary_nodes(summary_node_id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_lcm_compaction_runs_scope_time
+    ON lcm_compaction_runs(workspace_id, session_id, task_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_lcm_compaction_runs_status_time
+    ON lcm_compaction_runs(status, started_at);
+
+CREATE TABLE IF NOT EXISTS lcm_context_projections (
+    projection_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    session_id TEXT NULL,
+    task_id TEXT NULL,
+    purpose TEXT NOT NULL,
+    block_count INTEGER NOT NULL,
+    token_total INTEGER NOT NULL,
+    token_stable_docs INTEGER NOT NULL,
+    token_runtime INTEGER NOT NULL,
+    token_summaries INTEGER NOT NULL,
+    token_fresh_tail INTEGER NOT NULL,
+    token_retrieval INTEGER NOT NULL,
+    included_refs_json TEXT NOT NULL,
+    omitted_refs_json TEXT NOT NULL,
+    blocks_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    schema_version TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_lcm_context_projections_scope_time
+    ON lcm_context_projections(workspace_id, session_id, task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_lcm_context_projections_purpose_time
+    ON lcm_context_projections(purpose, created_at);
+
+CREATE TABLE IF NOT EXISTS lcm_large_file_refs (
+    file_ref_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    session_id TEXT NULL,
+    task_id TEXT NULL,
+    source_path TEXT NOT NULL,
+    mime_type TEXT NULL,
+    byte_size INTEGER NULL,
+    token_count INTEGER NULL,
+    exploration_summary TEXT NOT NULL,
+    storage_mode TEXT NOT NULL DEFAULT 'path_ref',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    meta_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_lcm_large_file_refs_scope_created
+    ON lcm_large_file_refs(workspace_id, session_id, task_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_lcm_large_file_refs_source_path
+    ON lcm_large_file_refs(source_path);
 "#;
 
 #[derive(Debug, Clone)]
@@ -194,6 +339,11 @@ impl SqlitePersistence {
                 MODEL_SWITCH_MIGRATION_DESCRIPTION,
                 MODEL_SWITCH_MIGRATION_SQL,
             ),
+            (
+                LCM_SCHEMA_MIGRATION_VERSION,
+                LCM_SCHEMA_MIGRATION_DESCRIPTION,
+                LCM_SCHEMA_MIGRATION_SQL,
+            ),
         ] {
             if applied_versions.contains(version) {
                 continue;
@@ -253,6 +403,25 @@ impl SqlitePersistence {
                 let session = row.context("failed to decode session row")?;
                 let session_id = session.session_id.clone();
                 sessions.push(self.load_session_record(connection, &session_id, session)?);
+            }
+            Ok(sessions)
+        })
+    }
+
+    fn list_session_heads(&self) -> Result<Vec<Session>> {
+        self.with_connection(|connection| {
+            let mut stmt = connection.prepare(
+                "SELECT session_id, workspace_id, agent_id, channel_id, surface_id, user_id,
+                        title, mode, status, last_turn_id, current_provider_id, current_model_id,
+                        pending_provider_id, pending_model_id, last_model_switched_at,
+                        created_at, updated_at, schema_version, meta_json
+                 FROM sessions
+                 ORDER BY updated_at DESC, created_at DESC, session_id ASC",
+            )?;
+            let rows = stmt.query_map([], read_session_row)?;
+            let mut sessions = Vec::new();
+            for row in rows {
+                sessions.push(row.context("failed to decode session head row")?);
             }
             Ok(sessions)
         })
@@ -407,6 +576,10 @@ impl SqlitePersistence {
 impl SessionStore for SqliteSessionStore {
     fn upsert_session(&self, session: Session) -> Result<Session> {
         self.backend()?.upsert_session(session)
+    }
+
+    fn list_session_heads(&self) -> Result<Vec<Session>> {
+        self.backend()?.list_session_heads()
     }
 
     fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
