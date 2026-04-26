@@ -1,4 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 use crate::builtin::context::{
     retrieval_bridge::RetrievalBridgeContextPlugin,
@@ -11,6 +15,8 @@ use crate::config::{WorkspaceIdentityPack, WorkspacePaths};
 use crate::context_engine::{
     assembler::{AssembledContext, ContextAssemblyRequest, TokenBreakdown},
     event_store::{EventStore, MessageBodyRecord},
+    expander::ExpansionResult,
+    persistence::{LcmSqliteStore, PersistRequest},
     projection_store::ProjectionStore,
     schema::ContextEngineSchema,
 };
@@ -20,9 +26,14 @@ use crate::domain::{
     SummaryNode, SummaryType,
 };
 use anyhow::Result;
+use std::path::PathBuf;
 
 const LEAF_SUMMARY_CHUNK_SIZE: usize = 4;
 const SELECTED_SUMMARY_LIMIT: usize = 3;
+const SUMMARY_AGGRESSIVE_WORDS: usize = 18;
+const SUMMARY_FALLBACK_WORDS: usize = 10;
+const FRESH_TAIL_AGGRESSIVE_LINES: usize = 6;
+const FRESH_TAIL_FALLBACK_LINES: usize = 3;
 
 pub trait ContextEngine: Send + Sync {
     fn append_event(&self, event: RuntimeEvent) -> Result<()>;
@@ -32,6 +43,24 @@ pub trait ContextEngine: Send + Sync {
         session_id: Option<&str>,
         task_id: Option<&str>,
     ) -> Result<ResumePack>;
+    fn grep_history(
+        &self,
+        session_id: Option<&str>,
+        task_id: Option<&str>,
+        query: &str,
+    ) -> Result<ExpansionResult>;
+    fn describe_object(
+        &self,
+        session_id: Option<&str>,
+        task_id: Option<&str>,
+        object_ref: &str,
+    ) -> Result<ExpansionResult>;
+    fn expand_summary(
+        &self,
+        session_id: Option<&str>,
+        task_id: Option<&str>,
+        summary_node_id: &str,
+    ) -> Result<ExpansionResult>;
 }
 
 #[derive(Debug, Clone, Default)]
@@ -67,6 +96,42 @@ impl ContextEngine for NoopContextEngine {
             risks: Vec::new(),
         })
     }
+
+    fn grep_history(
+        &self,
+        _session_id: Option<&str>,
+        _task_id: Option<&str>,
+        query: &str,
+    ) -> Result<ExpansionResult> {
+        Ok(ExpansionResult {
+            matched_refs: Vec::new(),
+            distilled_text: format!("no history matches for {query}"),
+        })
+    }
+
+    fn describe_object(
+        &self,
+        _session_id: Option<&str>,
+        _task_id: Option<&str>,
+        object_ref: &str,
+    ) -> Result<ExpansionResult> {
+        Ok(ExpansionResult {
+            matched_refs: vec![object_ref.to_string()],
+            distilled_text: format!("no description available for {object_ref}"),
+        })
+    }
+
+    fn expand_summary(
+        &self,
+        _session_id: Option<&str>,
+        _task_id: Option<&str>,
+        summary_node_id: &str,
+    ) -> Result<ExpansionResult> {
+        Ok(ExpansionResult {
+            matched_refs: vec![summary_node_id.to_string()],
+            distilled_text: format!("no expansion available for {summary_node_id}"),
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +141,9 @@ pub struct WorkspaceContextEngine {
     events: EventStore,
     projections: ProjectionStore,
     schema: ContextEngineSchema,
+    sqlite: Option<LcmSqliteStore>,
+    sqlite_bootstrap_error: Option<String>,
+    persistence_error_count: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +168,13 @@ struct DerivedContextState {
 }
 
 #[derive(Debug, Clone)]
+struct BudgetedBlocks {
+    blocks: Vec<ContextBlock>,
+    omitted_refs: Vec<String>,
+    compaction_reason: String,
+}
+
+#[derive(Debug, Clone)]
 struct TaskRuntimeState {
     active_task_ids: Vec<String>,
     latest_goal: Option<String>,
@@ -114,7 +189,21 @@ struct TaskRuntimeState {
 }
 
 impl WorkspaceContextEngine {
-    pub fn new(identity: WorkspaceIdentityPack, workspace_paths: WorkspacePaths) -> Self {
+    pub fn new(
+        identity: WorkspaceIdentityPack,
+        workspace_paths: WorkspacePaths,
+        runtime_state_root: PathBuf,
+    ) -> Self {
+        let (sqlite, sqlite_bootstrap_error) = match LcmSqliteStore::open(
+            runtime_state_root.join("session_event_persistence.sqlite3"),
+        ) {
+            Ok(store) => (Some(store), None),
+            Err(error) => {
+                let detail = format!("lcm sqlite bootstrap failed: {error}");
+                eprintln!("{detail}");
+                (None, Some(detail))
+            }
+        };
         Self {
             identity,
             retrieval: RetrievalBridgeContextPlugin::new(&workspace_paths),
@@ -127,6 +216,9 @@ impl WorkspaceContextEngine {
                 resume_schema_version: "2026-04-13".into(),
                 checkpoint_schema_version: "2026-04-13".into(),
             },
+            sqlite,
+            sqlite_bootstrap_error,
+            persistence_error_count: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -138,7 +230,7 @@ impl ContextEngine for WorkspaceContextEngine {
     }
 
     fn assemble_context(&self, request: ContextAssemblyRequest) -> Result<AssembledContext> {
-        let derived = self.derive_context_state(
+        let mut derived = self.derive_context_state(
             request.session_id.as_deref(),
             request.task_id.as_deref(),
             &request.purpose,
@@ -207,6 +299,14 @@ impl ContextEngine for WorkspaceContextEngine {
             blocks.extend(knowledge_blocks);
         }
 
+        let budgeted =
+            self.enforce_budget(blocks, request.budget_tokens, &derived.compaction_reason);
+        derived.omitted_refs.extend(budgeted.omitted_refs);
+        derived.compaction_reason = budgeted.compaction_reason;
+
+        let blocks = budgeted.blocks;
+        let token_breakdown = self.compute_token_breakdown(&blocks);
+
         self.projections.replace(ContextProjection {
             projection_id: projection_id(
                 request.session_id.as_deref(),
@@ -217,31 +317,6 @@ impl ContextEngine for WorkspaceContextEngine {
             task_id: request.task_id.clone(),
             purpose: request.purpose.clone(),
             blocks: blocks.clone(),
-        });
-
-        let stable_docs = token_sum(&blocks, |block| {
-            matches!(
-                block.kind,
-                ContextBlockKind::StableIdentity
-                    | ContextBlockKind::Mission
-                    | ContextBlockKind::Rule
-                    | ContextBlockKind::UserProfile
-                    | ContextBlockKind::RuntimeDirective
-            )
-        });
-        let runtime = token_sum(&blocks, |block| block.kind == ContextBlockKind::TaskPlan);
-        let summaries = token_sum(&blocks, |block| {
-            matches!(
-                block.kind,
-                ContextBlockKind::Summary | ContextBlockKind::Checkpoint
-            )
-        });
-        let fresh_tail = token_sum(&blocks, |block| block.kind == ContextBlockKind::RecentEvent);
-        let retrieval = token_sum(&blocks, |block| {
-            matches!(
-                block.kind,
-                ContextBlockKind::Memory | ContextBlockKind::RetrievedKnowledge
-            )
         });
 
         let mut included_refs = BTreeSet::new();
@@ -269,19 +344,55 @@ impl ContextEngine for WorkspaceContextEngine {
                 _ => {}
             }
         }
-        included_refs.extend(derived.included_refs);
+        let mut included_refs_vec = included_refs.into_iter().collect::<Vec<_>>();
+        included_refs_vec.extend(derived.included_refs);
+        included_refs_vec.sort();
+        included_refs_vec.dedup();
+
+        let mut persistence_status = "lcm_persistence=disabled".to_string();
+        match (self.projections.current(), self.sqlite.as_ref()) {
+            (Some(projection), Some(sqlite)) => {
+                match sqlite.persist(PersistRequest {
+                    workspace_id: &self.identity.workspace_id,
+                    request: &request,
+                    projection: &projection,
+                    token_breakdown: &token_breakdown,
+                    included_refs: &included_refs_vec,
+                    omitted_refs: &derived.omitted_refs,
+                    summaries: &derived.summary_nodes,
+                    checkpoint: derived.latest_checkpoint.as_ref(),
+                    compaction_reason: &derived.compaction_reason,
+                }) {
+                    Ok(()) => {
+                        persistence_status = format!(
+                            "lcm_persistence=ok;errors={}",
+                            self.persistence_error_count.load(Ordering::Relaxed)
+                        );
+                    }
+                    Err(error) => {
+                        let failures =
+                            self.persistence_error_count.fetch_add(1, Ordering::Relaxed) + 1;
+                        let detail = format!("lcm sqlite persist failed ({failures}): {error}");
+                        eprintln!("{detail}");
+                        persistence_status =
+                            format!("lcm_persistence=error;errors={failures};last={error}");
+                    }
+                }
+            }
+            (_, None) => {
+                if let Some(error) = self.sqlite_bootstrap_error.as_deref() {
+                    persistence_status = format!("lcm_persistence=bootstrap_error;detail={error}");
+                }
+            }
+            (None, Some(_)) => {
+                persistence_status = "lcm_persistence=projection_missing".to_string();
+            }
+        }
 
         Ok(AssembledContext {
             blocks,
-            token_breakdown: TokenBreakdown {
-                total: stable_docs + runtime + summaries + fresh_tail + retrieval,
-                stable_docs,
-                runtime,
-                summaries,
-                fresh_tail,
-                retrieval,
-            },
-            included_refs: included_refs.into_iter().collect(),
+            token_breakdown,
+            included_refs: included_refs_vec,
             omitted_refs: derived.omitted_refs,
             system_prompt_additions: vec![
                 format!(
@@ -290,6 +401,7 @@ impl ContextEngine for WorkspaceContextEngine {
                 ),
                 "lcm_summary_scope=user_message_and_assistant_message_bodies_only; tools, skills, and workspace core files are injected separately".into(),
                 format!("lcm_compaction={}", derived.compaction_reason),
+                persistence_status,
             ],
         })
     }
@@ -322,6 +434,120 @@ impl ContextEngine for WorkspaceContextEngine {
             next_recommended_action: derived.next_recommended_action,
             assumptions: derived.assumptions,
             risks: derived.risks,
+        })
+    }
+
+    fn grep_history(
+        &self,
+        session_id: Option<&str>,
+        task_id: Option<&str>,
+        query: &str,
+    ) -> Result<ExpansionResult> {
+        let needle = query.to_ascii_lowercase();
+        let messages = self.events.message_body_records(session_id, task_id);
+        let mut matched_refs = Vec::new();
+        let mut lines = Vec::new();
+        for message in messages {
+            let content = message.content.to_ascii_lowercase();
+            if !content.contains(&needle) {
+                continue;
+            }
+            matched_refs.push(message.event_id.clone());
+            lines.push(format!(
+                "{} [{}]: {}",
+                message.role,
+                message.event_id,
+                truncate_for_summary(&message.content, 28)
+            ));
+            if lines.len() >= 8 {
+                break;
+            }
+        }
+        Ok(ExpansionResult {
+            matched_refs,
+            distilled_text: if lines.is_empty() {
+                format!("no history matches for {query}")
+            } else {
+                lines.join("\n")
+            },
+        })
+    }
+
+    fn describe_object(
+        &self,
+        session_id: Option<&str>,
+        task_id: Option<&str>,
+        object_ref: &str,
+    ) -> Result<ExpansionResult> {
+        if object_ref.starts_with("summary::") {
+            return self.expand_summary(session_id, task_id, object_ref);
+        }
+        let scoped = self.events.list_scoped(session_id, task_id);
+        if let Some(event) = scoped
+            .into_iter()
+            .find(|event| event.event_id == object_ref)
+        {
+            return Ok(ExpansionResult {
+                matched_refs: vec![object_ref.to_string()],
+                distilled_text: format!(
+                    "event_type={:?}\noccurred_at={}\npayload={}",
+                    event.event_type,
+                    event.occurred_at.to_rfc3339(),
+                    event.payload
+                ),
+            });
+        }
+        Ok(ExpansionResult {
+            matched_refs: vec![object_ref.to_string()],
+            distilled_text: format!("object not found in scoped history: {object_ref}"),
+        })
+    }
+
+    fn expand_summary(
+        &self,
+        session_id: Option<&str>,
+        task_id: Option<&str>,
+        summary_node_id: &str,
+    ) -> Result<ExpansionResult> {
+        let derived =
+            self.derive_context_state(session_id, task_id, &ContextAssemblyPurpose::Resume);
+        if let Some(summary) = derived
+            .summary_nodes
+            .iter()
+            .find(|summary| summary.summary_node_id == summary_node_id)
+        {
+            let source_messages = self.events.message_body_records(session_id, task_id);
+            let source_lines = source_messages
+                .iter()
+                .filter(|message| summary.source_event_ids.contains(&message.event_id))
+                .take(16)
+                .map(|message| {
+                    format!(
+                        "{} [{}]: {}",
+                        message.role, message.event_id, message.content
+                    )
+                })
+                .collect::<Vec<_>>();
+            return Ok(ExpansionResult {
+                matched_refs: summary.source_event_ids.clone(),
+                distilled_text: if source_lines.is_empty() {
+                    summary.content.clone()
+                } else {
+                    source_lines.join("\n")
+                },
+            });
+        }
+        if let Some(checkpoint) = derived.latest_checkpoint.as_ref() {
+            if checkpoint.summary_node_id == summary_node_id {
+                return Ok(ExpansionResult {
+                    matched_refs: checkpoint.source_event_ids.clone(),
+                    distilled_text: checkpoint.content.clone(),
+                });
+            }
+        }
+        Ok(ExpansionResult {
+            matched_refs: vec![summary_node_id.to_string()],
+            distilled_text: format!("summary not found in scoped context: {summary_node_id}"),
         })
     }
 }
@@ -617,6 +843,152 @@ impl WorkspaceContextEngine {
             .enumerate()
             .map(|(index, item)| retrieved_block(index + 100, item))
             .collect())
+    }
+
+    fn compute_token_breakdown(&self, blocks: &[ContextBlock]) -> TokenBreakdown {
+        let stable_docs = token_sum(&blocks, |block| {
+            matches!(
+                block.kind,
+                ContextBlockKind::StableIdentity
+                    | ContextBlockKind::Mission
+                    | ContextBlockKind::Rule
+                    | ContextBlockKind::UserProfile
+                    | ContextBlockKind::RuntimeDirective
+            )
+        });
+        let runtime = token_sum(&blocks, |block| block.kind == ContextBlockKind::TaskPlan);
+        let summaries = token_sum(&blocks, |block| {
+            matches!(
+                block.kind,
+                ContextBlockKind::Summary | ContextBlockKind::Checkpoint
+            )
+        });
+        let fresh_tail = token_sum(&blocks, |block| block.kind == ContextBlockKind::RecentEvent);
+        let retrieval = token_sum(&blocks, |block| {
+            matches!(
+                block.kind,
+                ContextBlockKind::Memory | ContextBlockKind::RetrievedKnowledge
+            )
+        });
+        TokenBreakdown {
+            total: stable_docs + runtime + summaries + fresh_tail + retrieval,
+            stable_docs,
+            runtime,
+            summaries,
+            fresh_tail,
+            retrieval,
+        }
+    }
+
+    fn enforce_budget(
+        &self,
+        mut blocks: Vec<ContextBlock>,
+        budget_tokens: u32,
+        base_reason: &str,
+    ) -> BudgetedBlocks {
+        let mut omitted_refs = Vec::new();
+
+        if self.compute_token_breakdown(&blocks).total <= budget_tokens {
+            return BudgetedBlocks {
+                blocks,
+                omitted_refs,
+                compaction_reason: format!("{base_reason};level=1"),
+            };
+        }
+
+        let mut retained = Vec::with_capacity(blocks.len());
+        for block in blocks.drain(..) {
+            let drop_retrieval = matches!(
+                block.kind,
+                ContextBlockKind::Memory | ContextBlockKind::RetrievedKnowledge
+            );
+            if drop_retrieval {
+                omitted_refs.push(block.block_id);
+            } else {
+                retained.push(block);
+            }
+        }
+        blocks = retained;
+
+        if self.compute_token_breakdown(&blocks).total <= budget_tokens {
+            return BudgetedBlocks {
+                blocks,
+                omitted_refs,
+                compaction_reason: format!("{base_reason};level=1;retrieval_trimmed"),
+            };
+        }
+
+        blocks = blocks
+            .into_iter()
+            .map(aggressive_compact_block)
+            .collect::<Vec<_>>();
+        if self.compute_token_breakdown(&blocks).total <= budget_tokens {
+            return BudgetedBlocks {
+                blocks,
+                omitted_refs,
+                compaction_reason: format!("{base_reason};level=2;aggressive"),
+            };
+        }
+
+        blocks = blocks
+            .into_iter()
+            .map(deterministic_fallback_block)
+            .collect::<Vec<_>>();
+
+        let mut hard_trimmed = false;
+        while self.compute_token_breakdown(&blocks).total > budget_tokens {
+            let Some(target_idx) = blocks
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, block)| block.token_estimate.unwrap_or_default())
+                .map(|(idx, _)| idx)
+            else {
+                break;
+            };
+            let compacted = deterministic_cut_once(blocks[target_idx].clone());
+            if compacted.token_estimate == blocks[target_idx].token_estimate {
+                let drop_idx = blocks
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, block)| block.priority)
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(target_idx);
+                let dropped = blocks.remove(drop_idx);
+                omitted_refs.extend(block_omission_refs(&dropped));
+                hard_trimmed = true;
+                if blocks.is_empty() {
+                    break;
+                }
+                continue;
+            }
+            blocks[target_idx] = compacted;
+            hard_trimmed = true;
+        }
+
+        let total = self.compute_token_breakdown(&blocks).total;
+        if total > budget_tokens {
+            while total_exceeds_budget(&blocks, budget_tokens) && !blocks.is_empty() {
+                let drop_idx = blocks
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, block)| block.priority)
+                    .map(|(idx, _)| idx)
+                    .expect("drop_idx exists");
+                let dropped = blocks.remove(drop_idx);
+                omitted_refs.extend(block_omission_refs(&dropped));
+                hard_trimmed = true;
+            }
+        }
+
+        BudgetedBlocks {
+            blocks,
+            omitted_refs,
+            compaction_reason: if hard_trimmed {
+                format!("{base_reason};level=3;deterministic_fallback;hard_enforced")
+            } else {
+                format!("{base_reason};level=3;deterministic_fallback")
+            },
+        }
     }
 }
 
@@ -1184,5 +1556,244 @@ fn retrieved_block(index: usize, item: RetrievalDocument) -> ContextBlock {
         freshness,
         confidence,
         content: format!("{}:\n{}", item.title, item.excerpt),
+    }
+}
+
+fn aggressive_compact_block(mut block: ContextBlock) -> ContextBlock {
+    match block.kind {
+        ContextBlockKind::Summary => {
+            block.content = truncate_for_summary(&block.content, SUMMARY_AGGRESSIVE_WORDS);
+            block.token_estimate = Some(estimate_tokens(&block.content));
+        }
+        ContextBlockKind::RecentEvent => {
+            let lines = block
+                .content
+                .lines()
+                .rev()
+                .take(FRESH_TAIL_AGGRESSIVE_LINES)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>();
+            block.content = lines.join("\n");
+            block.token_estimate = Some(estimate_tokens(&block.content));
+        }
+        _ => {}
+    }
+    block
+}
+
+fn deterministic_fallback_block(mut block: ContextBlock) -> ContextBlock {
+    match block.kind {
+        ContextBlockKind::Summary => {
+            block.content = truncate_for_summary(&block.content, SUMMARY_FALLBACK_WORDS);
+            block.token_estimate = Some(estimate_tokens(&block.content));
+        }
+        ContextBlockKind::RecentEvent => {
+            let lines = block
+                .content
+                .lines()
+                .rev()
+                .take(FRESH_TAIL_FALLBACK_LINES)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>();
+            block.content = lines.join("\n");
+            block.token_estimate = Some(estimate_tokens(&block.content));
+        }
+        _ => {}
+    }
+    block
+}
+
+fn deterministic_cut_once(mut block: ContextBlock) -> ContextBlock {
+    let words = block.content.split_whitespace().collect::<Vec<_>>();
+    if words.len() <= 6 {
+        return block;
+    }
+    let cut = (words.len() / 2).max(6);
+    block.content = format!("{} ...", words[..cut].join(" "));
+    block.token_estimate = Some(estimate_tokens(&block.content));
+    block
+}
+
+fn block_omission_refs(block: &ContextBlock) -> Vec<String> {
+    let mut refs = vec![block.block_id.clone()];
+    match &block.source {
+        ContextSource::WorkspaceFile { path } => refs.push(path.clone()),
+        ContextSource::EventLog { event_id } => refs.push(event_id.clone()),
+        ContextSource::Summary { summary_node_id } => refs.push(summary_node_id.clone()),
+        ContextSource::Memory { memory_ref } => refs.push(memory_ref.clone()),
+        ContextSource::Knowledge { knowledge_ref } => refs.push(knowledge_ref.clone()),
+        ContextSource::ToolTrace { tool_call_id } => refs.push(tool_call_id.clone()),
+        ContextSource::Artifact { artifact_id } => refs.push(artifact_id.clone()),
+        ContextSource::Runtime => {}
+    }
+    refs
+}
+
+fn total_exceeds_budget(blocks: &[ContextBlock], budget_tokens: u32) -> bool {
+    blocks
+        .iter()
+        .map(|block| block.token_estimate.unwrap_or_default())
+        .sum::<u32>()
+        > budget_tokens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use chrono::Utc;
+    use serde_json::json;
+
+    use crate::{
+        builtin::context::retrieval_types::RetrievalScope,
+        config::WorkspaceDocument,
+        domain::{ContextAssemblyPurpose, EventSource, EventType, RuntimeEvent},
+    };
+
+    #[test]
+    fn assemble_context_stays_within_budget() {
+        let engine = sample_engine();
+        for idx in 0..16 {
+            let role = if idx % 2 == 0 { "user" } else { "assistant" };
+            let event_type = if role == "user" {
+                EventType::MessageReceived
+            } else {
+                EventType::TurnSucceeded
+            };
+            let payload = if role == "user" {
+                json!({
+                    "message": { "role": role, "content": format!("request {idx} with enough words to force compaction in budget test") }
+                })
+            } else {
+                json!({
+                    "assistant_message": { "role": role, "content": format!("response {idx} with enough words to force compaction in budget test") }
+                })
+            };
+            engine
+                .append_event(RuntimeEvent {
+                    event_id: format!("evt_{idx}"),
+                    event_type,
+                    occurred_at: Utc::now(),
+                    workspace_id: Some("ws.test".into()),
+                    agent_id: Some("agent.test".into()),
+                    session_id: Some("session.test".into()),
+                    turn_id: Some(format!("turn_{idx}")),
+                    task_id: Some("task.test".into()),
+                    plugin_id: None,
+                    node_id: None,
+                    source: EventSource::Agent,
+                    causation_id: None,
+                    correlation_id: None,
+                    idempotency_key: None,
+                    payload,
+                    schema_version: "event.v1".into(),
+                })
+                .expect("append should succeed");
+        }
+
+        let assembled = engine
+            .assemble_context(ContextAssemblyRequest {
+                session_id: Some("session.test".into()),
+                task_id: Some("task.test".into()),
+                budget_tokens: 120,
+                purpose: ContextAssemblyPurpose::Chat,
+                model_profile: None,
+                retrieval_scope: RetrievalScope::Disabled,
+            })
+            .expect("assemble should succeed");
+        assert!(assembled.token_breakdown.total <= 120);
+        assert!(assembled
+            .system_prompt_additions
+            .iter()
+            .any(|line| line.contains("lcm_compaction")));
+    }
+
+    #[test]
+    fn expand_summary_returns_source_messages() {
+        let engine = sample_engine();
+        let events = vec![
+            RuntimeEvent {
+                event_id: "evt_user".into(),
+                event_type: EventType::MessageReceived,
+                occurred_at: Utc::now(),
+                workspace_id: Some("ws.test".into()),
+                agent_id: Some("agent.test".into()),
+                session_id: Some("session.test".into()),
+                turn_id: Some("turn_1".into()),
+                task_id: Some("task.test".into()),
+                plugin_id: None,
+                node_id: None,
+                source: EventSource::User,
+                causation_id: None,
+                correlation_id: None,
+                idempotency_key: None,
+                payload: json!({"message": {"role": "user", "content": "please remember alpha and beta details"}}),
+                schema_version: "event.v1".into(),
+            },
+            RuntimeEvent {
+                event_id: "evt_assistant".into(),
+                event_type: EventType::TurnSucceeded,
+                occurred_at: Utc::now(),
+                workspace_id: Some("ws.test".into()),
+                agent_id: Some("agent.test".into()),
+                session_id: Some("session.test".into()),
+                turn_id: Some("turn_1".into()),
+                task_id: Some("task.test".into()),
+                plugin_id: None,
+                node_id: None,
+                source: EventSource::Agent,
+                causation_id: None,
+                correlation_id: None,
+                idempotency_key: None,
+                payload: json!({"assistant_message": {"role": "assistant", "content": "confirmed alpha and beta details"}}),
+                schema_version: "event.v1".into(),
+            },
+        ];
+        for event in events {
+            engine.append_event(event).expect("append should succeed");
+        }
+
+        let summary_id = "summary::session.test::task.test::leaf::0";
+        let expansion = engine
+            .expand_summary(Some("session.test"), Some("task.test"), summary_id)
+            .expect("expand should succeed");
+        assert!(expansion
+            .matched_refs
+            .iter()
+            .any(|event_id| event_id == "evt_user"));
+        assert!(expansion.distilled_text.contains("alpha"));
+    }
+
+    fn sample_engine() -> WorkspaceContextEngine {
+        let root = std::env::temp_dir().join(format!(
+            "agentjax-context-engine-{}",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let workspace_root = root.join("workspace");
+        let state_root = root.join("runtime").join("state");
+        let _ = std::fs::create_dir_all(&workspace_root);
+        let _ = std::fs::create_dir_all(&state_root);
+        let make_doc = |name: &str, content: &str| WorkspaceDocument {
+            path: workspace_root.join(name),
+            content: content.into(),
+        };
+        WorkspaceContextEngine::new(
+            WorkspaceIdentityPack {
+                workspace_id: "ws.test".into(),
+                agent: make_doc("AGENT.md", "agent"),
+                soul: make_doc("SOUL.md", "soul"),
+                user: make_doc("USER.md", "user"),
+                memory: make_doc("MEMORY.md", "memory"),
+                mission: make_doc("MISSION.md", "mission"),
+                rules: make_doc("RULES.md", "rules"),
+                router: make_doc("ROUTER.md", "router"),
+            },
+            WorkspacePaths::new(workspace_root),
+            state_root,
+        )
     }
 }

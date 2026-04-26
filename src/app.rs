@@ -116,6 +116,7 @@ impl Application {
             context_engine: Arc::new(WorkspaceContextEngine::new(
                 workspace_identity,
                 workspace_runtime.workspace.paths.clone(),
+                runtime_config.runtime_paths.state_root.clone(),
             )),
             runtime,
             workspace_runtime,

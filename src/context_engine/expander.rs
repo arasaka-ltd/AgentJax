@@ -7,6 +7,7 @@ pub struct ExpansionResult {
 pub trait HistoryExpander: Send + Sync {
     fn grep_history(&self, query: &str) -> ExpansionResult;
     fn describe_object(&self, object_ref: &str) -> ExpansionResult;
+    fn expand_summary(&self, summary_node_id: &str) -> ExpansionResult;
 }
 #[derive(Debug, Clone, Default)]
 pub struct NoopHistoryExpander;
@@ -21,6 +22,13 @@ impl HistoryExpander for NoopHistoryExpander {
         ExpansionResult {
             matched_refs: vec![object_ref.to_string()],
             distilled_text: format!("no description available for {object_ref}"),
+        }
+    }
+
+    fn expand_summary(&self, summary_node_id: &str) -> ExpansionResult {
+        ExpansionResult {
+            matched_refs: vec![summary_node_id.to_string()],
+            distilled_text: format!("no expansion available for {summary_node_id}"),
         }
     }
 }
